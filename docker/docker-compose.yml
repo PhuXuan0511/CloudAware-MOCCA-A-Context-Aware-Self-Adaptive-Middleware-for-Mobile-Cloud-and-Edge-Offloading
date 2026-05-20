@@ -1,0 +1,26 @@
+version: "3.9"
+
+services:
+  edge-server:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.edge
+    ports:
+      - "8001:8001"
+    environment:
+      - CLOUD_SERVER_URL=http://cloud-server:8002
+    networks:
+      - middleware-net
+
+  cloud-server:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.cloud
+    ports:
+      - "8002:8002"
+    networks:
+      - middleware-net
+
+networks:
+  middleware-net:
+    driver: bridge

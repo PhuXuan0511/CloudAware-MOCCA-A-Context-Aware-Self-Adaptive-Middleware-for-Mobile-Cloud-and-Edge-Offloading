@@ -39,7 +39,13 @@ data class LocationContext(
 )
 
 data class MobilityContext(
-    val speedMps: Float,
+    /**
+     * Smoothed linear acceleration magnitude in m/s² (gravity subtracted).
+     * Not actual speed — phones don't directly report ground speed from the
+     * accelerometer. The field is kept as a movement-intensity signal; the
+     * coarse [movementState] classification is what the policy actually reads.
+     */
+    val linearAccelerationMps2: Float,
     val movementState: MovementState  // STATIONARY, WALKING, VEHICLE
 ) {
     val isStable: Boolean get() = movementState == MovementState.STATIONARY

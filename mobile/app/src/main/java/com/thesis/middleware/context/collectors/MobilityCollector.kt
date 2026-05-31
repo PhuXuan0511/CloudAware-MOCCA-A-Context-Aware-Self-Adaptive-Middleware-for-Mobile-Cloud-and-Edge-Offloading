@@ -37,7 +37,7 @@ class MobilityCollector(context: Context) : SensorEventListener {
             linear < WALKING_THRESHOLD -> MovementState.WALKING
             else -> MovementState.VEHICLE
         }
-        return MobilityContext(speedMps = linear, movementState = state)
+        return MobilityContext(linearAccelerationMps2 = linear, movementState = state)
     }
 
     fun stop() {

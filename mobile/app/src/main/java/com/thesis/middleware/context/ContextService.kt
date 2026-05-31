@@ -11,6 +11,9 @@ import android.os.IBinder
 import android.util.Log
 import com.thesis.middleware.MiddlewareApp
 import com.thesis.middleware.R
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.flow.launchIn
+import kotlinx.coroutines.flow.onEach
 
 /**
  * Long-lived foreground service that hosts the lifecycle of the two background
@@ -30,6 +33,8 @@ import com.thesis.middleware.R
  */
 class ContextService : Service() {
 
+    private var metricsJob: Job? = null
+
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onCreate() {
@@ -38,7 +43,13 @@ class ContextService : Service() {
         val app = application as MiddlewareApp
         app.contextManager.start()
         app.mapeLoop.start()
-        Log.i(TAG, "ContextService started — ContextManager + MapeLoop running")
+
+        // Persist every ExecutionEvent to mocca-metrics.csv for offline analysis.
+        metricsJob = app.executionProxy.events
+            .onEach { event -> app.metricsRecorder.record(event) }
+            .launchIn(app.appScope)
+
+        Log.i(TAG, "ContextService started — loops running; metrics → ${app.metricsRecorder.filePath}")
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -49,6 +60,8 @@ class ContextService : Service() {
 
     override fun onDestroy() {
         val app = application as MiddlewareApp
+        metricsJob?.cancel()
+        metricsJob = null
         app.mapeLoop.stop()
         app.contextManager.stop()
         Log.i(TAG, "ContextService destroyed — loops stopped")

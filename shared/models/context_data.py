@@ -41,7 +41,7 @@ class LocationContext(BaseModel):
 
 
 class MobilityContext(BaseModel):
-    speed_mps: float
+    linear_acceleration_mps2: float  # smoothed accelerometer magnitude, gravity-subtracted
     movement_state: MovementState
 
 

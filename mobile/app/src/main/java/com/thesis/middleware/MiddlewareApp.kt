@@ -8,6 +8,7 @@ import com.thesis.middleware.communication.OffloadingClient
 import com.thesis.middleware.context.ContextManager
 import com.thesis.middleware.decision.MapeLoop
 import com.thesis.middleware.decision.policy.OffloadingPolicy
+import com.thesis.middleware.metrics.MetricsRecorder
 import com.thesis.middleware.settings.EndpointsRepository
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -50,6 +51,9 @@ class MiddlewareApp : Application() {
 
     // ── Settings ──────────────────────────────────────────────────────────
     val endpointsRepository: EndpointsRepository by lazy { EndpointsRepository(this) }
+
+    // ── Metrics / telemetry ───────────────────────────────────────────────
+    val metricsRecorder: MetricsRecorder by lazy { MetricsRecorder(this) }
 
     // ── Communication layer ───────────────────────────────────────────────
     val connectionManager: ConnectionManager by lazy {

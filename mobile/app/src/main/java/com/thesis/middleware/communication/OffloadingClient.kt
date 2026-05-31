@@ -56,13 +56,20 @@ class OffloadingClient(
         .build()
         .create(OffloadApi::class.java)
 
-    suspend fun submitToEdge(task: OffloadableTask): ByteArray =
-        submit(task, connectionManager.edgeEndpoint)
+    suspend fun submitToEdge(task: OffloadableTask): ByteArray = submit(task, Tier.EDGE)
+    suspend fun submitToCloud(task: OffloadableTask): ByteArray = submit(task, Tier.CLOUD)
 
-    suspend fun submitToCloud(task: OffloadableTask): ByteArray =
-        submit(task, connectionManager.cloudEndpoint)
+    private suspend fun submit(task: OffloadableTask, tier: Tier): ByteArray {
+        val (baseUrl, reachable) = when (tier) {
+            Tier.EDGE -> connectionManager.edgeEndpoint to connectionManager.isEdgeReachable()
+            Tier.CLOUD -> connectionManager.cloudEndpoint to connectionManager.isCloudReachable()
+        }
+        if (!reachable) {
+            // Fast-fail without paying the OkHttp connect timeout — caller (ExecutionProxy)
+            // catches and falls back to local execution.
+            throw java.io.IOException("$tier endpoint not reachable: $baseUrl")
+        }
 
-    private suspend fun submit(task: OffloadableTask, baseUrl: String): ByteArray {
         val snapshot = contextManager.getLatestFeatures().rawSnapshot
         val response = api.offload("$baseUrl/api/v1/offload", OffloadingRequestDto.from(task, snapshot))
         if (!response.success) {
@@ -73,6 +80,8 @@ class OffloadingClient(
         }
         return response.resultPayload
     }
+
+    private enum class Tier { EDGE, CLOUD }
 
     private interface OffloadApi {
         @POST
@@ -140,7 +149,7 @@ class OffloadingClient(
                     accuracy = s.location.accuracy
                 ),
                 mobility = MobilityDto(
-                    speedMps = s.mobility.speedMps,
+                    linearAccelerationMps2 = s.mobility.linearAccelerationMps2,
                     movementState = s.mobility.movementState.name
                 ),
                 timestamp = s.timestamp
@@ -174,7 +183,7 @@ class OffloadingClient(
     )
 
     private data class MobilityDto(
-        @SerializedName("speed_mps") val speedMps: Float,
+        @SerializedName("linear_acceleration_mps2") val linearAccelerationMps2: Float,
         @SerializedName("movement_state") val movementState: String
     )
 

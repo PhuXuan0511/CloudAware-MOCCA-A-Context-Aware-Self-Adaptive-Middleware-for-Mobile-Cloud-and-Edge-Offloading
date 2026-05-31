@@ -40,8 +40,8 @@ import java.util.concurrent.TimeUnit
 class OffloadingClient(
     private val connectionManager: ConnectionManager,
     private val contextManager: ContextManager,
-    securityManager: SecurityManager,
-    httpClient: OkHttpClient = defaultClient(securityManager),
+    securityManager: SecurityManager? = null,
+    httpClient: OkHttpClient = if (securityManager != null) defaultClient(securityManager) else defaultClientNoAuth(),
 ) {
 
     private val gson = GsonBuilder()
@@ -64,7 +64,7 @@ class OffloadingClient(
 
     private suspend fun submit(task: OffloadableTask, baseUrl: String): ByteArray {
         val snapshot = contextManager.getLatestFeatures().rawSnapshot
-        val response = api.offload("$baseUrl/offload", OffloadingRequestDto.from(task, snapshot))
+        val response = api.offload("$baseUrl/api/v1/offload", OffloadingRequestDto.from(task, snapshot))
         if (!response.success) {
             throw OffloadingException(
                 "remote task ${response.taskId} failed at ${response.executedAt}: " +
@@ -197,6 +197,16 @@ class OffloadingClient(
                         .build()
                     chain.proceed(request)
                 }
+                .addInterceptor(logging)
+                .connectTimeout(5, TimeUnit.SECONDS)
+                .readTimeout(15, TimeUnit.SECONDS)
+                .build()
+        }
+
+        /** Dev / demo client without auth — pair with [securityManager] = null. */
+        fun defaultClientNoAuth(): OkHttpClient {
+            val logging = HttpLoggingInterceptor().apply { level = HttpLoggingInterceptor.Level.BASIC }
+            return OkHttpClient.Builder()
                 .addInterceptor(logging)
                 .connectTimeout(5, TimeUnit.SECONDS)
                 .readTimeout(15, TimeUnit.SECONDS)

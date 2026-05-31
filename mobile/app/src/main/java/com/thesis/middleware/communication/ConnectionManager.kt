@@ -57,7 +57,7 @@ class ConnectionManager(
     }
 
     private suspend fun probeOnce(endpoint: String): Probe = withContext(Dispatchers.IO) {
-        val request = Request.Builder().url("$endpoint/status").get().build()
+        val request = Request.Builder().url("$endpoint/health").get().build()
         val ok = runCatching {
             httpClient.newCall(request).execute().use { it.isSuccessful }
         }.getOrDefault(false)

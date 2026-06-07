@@ -12,10 +12,14 @@
     <string name="main_status_running">MOCCA middleware running — context service active.</string>
     <string name="main_status_permission_needed">Permissions needed to start middleware.</string>
     <string name="main_open_settings">Settings</string>
-    <string name="main_task_echo">Echo</string>
-    <string name="main_task_sha">SHA-256</string>
-    <string name="main_task_matrix">Matrix×</string>
-    <string name="main_log_placeholder">No tasks run yet. Press Echo / SHA-256 / Matrix× above — the MAPE decision will appear here.</string>
+    <string name="main_reset_stats">Reset Stats</string>
+    <string name="main_card_empty">No runs yet\nTap to start</string>
+    <string name="main_task_echo">Ping</string>
+    <string name="main_task_sha">Hash Text</string>
+    <string name="main_task_image">Grayscale Photo</string>
+    <string name="main_task_matrix">Matrix Math</string>
+    <string name="main_task_video">Video Edges</string>
+    <string name="main_log_placeholder">No tasks run yet.\n\nTap a task button above. Each result will show four fields:\n\n  Ran on  — where the task executed:\n            • Phone  = ran on this device (no network call)\n            • Edge   = laptop on same Wi-Fi (low latency)\n            • Cloud  = remote server (more compute, higher latency)\n\n  Took    — total wall-clock time end-to-end. Lower = faster.\n\n  Output  — size of the returned result (bytes / KB / MB).\n\n  Why     — the planner\'s reasoning: which signals\n            (network, battery, CPU, task size) drove the choice.\n\nTip: try the same task while toggling Wi-Fi or walking away from\nthe router. The planner should pick different targets as\nconditions change — that is the self-adaptive behavior.</string>
 
     <!-- Settings activity -->
     <string name="settings_title">Server endpoints</string>

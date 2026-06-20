@@ -87,12 +87,6 @@ class SettingsActivity : Activity() {
         edgeField = urlField()
         cloudField = urlField()
 
-        val hint = TextView(this).apply {
-            setText(R.string.settings_hint)
-            textSize = 12f
-            setTextColor(Color.GRAY)
-            setPadding(0, pad, 0, pad)
-        }
         val saveButton = Button(this).apply {
             setText(R.string.settings_save)
             setOnClickListener { onSave() }
@@ -110,7 +104,6 @@ class SettingsActivity : Activity() {
             addView(edgeField)
             addView(label(R.string.settings_cloud_label))
             addView(cloudField)
-            addView(hint)
             addView(saveButton)
         }
     }

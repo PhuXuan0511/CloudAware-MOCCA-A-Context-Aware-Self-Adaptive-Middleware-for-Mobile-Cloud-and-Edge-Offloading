@@ -19,13 +19,12 @@
     <string name="main_task_image">Grayscale Photo</string>
     <string name="main_task_matrix">Matrix Math</string>
     <string name="main_task_video">Video Edges</string>
-    <string name="main_log_placeholder">No tasks run yet.\n\nTap a task button above. Each result will show four fields:\n\n  Ran on  — where the task executed:\n            • Phone  = ran on this device (no network call)\n            • Edge   = laptop on same Wi-Fi (low latency)\n            • Cloud  = remote server (more compute, higher latency)\n\n  Took    — total wall-clock time end-to-end. Lower = faster.\n\n  Output  — size of the returned result (bytes / KB / MB).\n\n  Why     — the planner\'s reasoning: which signals\n            (network, battery, CPU, task size) drove the choice.\n\nTip: try the same task while toggling Wi-Fi or walking away from\nthe router. The planner should pick different targets as\nconditions change — that is the self-adaptive behavior.</string>
+    <string name="main_log_placeholder">No tasks run yet.\n\nTap a task button above. Each result will show four fields:\n\n  Ran on  — where the task executed:\n            • Phone  = ran on this device (no network call)\n            • Edge   = laptop on same Wi-Fi (low latency)\n            • Cloud  = remote server (more compute, higher latency)\n\n  Took    — total wall-clock time end-to-end. Lower = faster.\n\n  Output  — size of the returned result (bytes / KB / MB).\n\n  Why     — the planner\'s reasoning: which signals\n            (network, battery, CPU, task size) drove the choice.</string>
 
     <!-- Settings activity -->
     <string name="settings_title">Server endpoints</string>
     <string name="settings_edge_label">Edge URL (e.g. http://192.168.1.10:8001)</string>
     <string name="settings_cloud_label">Cloud URL (e.g. http://192.168.1.10:8002)</string>
-    <string name="settings_hint">Tip: run `ipconfig` (Windows) or `ifconfig` (macOS/Linux) on the laptop to find its LAN IP. Both phone and laptop must be on the same Wi-Fi.</string>
     <string name="settings_save">Save</string>
     <string name="settings_saved">Endpoints saved — service restarted.</string>
     <string name="settings_invalid_url">URL must start with http:// or https://</string>

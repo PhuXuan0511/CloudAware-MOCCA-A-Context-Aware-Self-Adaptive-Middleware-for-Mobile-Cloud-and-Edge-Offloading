@@ -129,7 +129,9 @@ class MapeLoop(
     private fun execute(plan: OffloadingPlan): OffloadingDecision = OffloadingDecision(
         shouldOffload = plan.target != ExecutionTarget.LOCAL,
         target = plan.target,
-        reasoning = plan.reasoning
+        rule = plan.rule,
+        reasoning = plan.reasoning,
+        signals = plan.signals,
     )
 
     private fun maxScoreDelta(a: ContextFeatures, b: ContextFeatures): Float = maxOf(
@@ -168,15 +170,44 @@ data class TaskAnalysis(
     val remoteExecTimeMs: Float = 0f
 )
 
+/**
+ * Snapshot of the raw context signals that the planner consulted for one
+ * decision. Stored on [OffloadingPlan] / [OffloadingDecision] so the UI and
+ * CSV logger can render the "why" without having to ask ContextManager again.
+ */
+data class SignalSnapshot(
+    val batteryPercent: Int,
+    val isCharging: Boolean,
+    val networkType: String,
+    val networkScore: Float,
+    val rttMs: Float,
+    val bandwidthMbps: Float,
+    val signalDbm: Int,
+    val cpuUsagePercent: Float,
+    val cpuCores: Int,
+    val isStable: Boolean,
+    val linearAccelMps2: Float,
+    val estLocalLatencyMs: Float,
+    val estRemoteLatencyMs: Float,
+    val estLocalEnergyMj: Float,
+    val estRemoteEnergyMj: Float,
+    val computeSpeedup: Float,
+    val taskComplexity: String,
+)
+
 data class OffloadingPlan(
     val target: ExecutionTarget,
-    val reasoning: String
+    val rule: String,
+    val reasoning: String,
+    val signals: SignalSnapshot,
 )
 
 data class OffloadingDecision(
     val shouldOffload: Boolean,
     val target: ExecutionTarget,
-    val reasoning: String
+    val rule: String,
+    val reasoning: String,
+    val signals: SignalSnapshot,
 )
 
 enum class ExecutionTarget { LOCAL, EDGE, CLOUD }

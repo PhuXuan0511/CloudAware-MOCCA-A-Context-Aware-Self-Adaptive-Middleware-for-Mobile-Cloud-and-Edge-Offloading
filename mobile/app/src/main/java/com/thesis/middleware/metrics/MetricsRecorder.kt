@@ -39,6 +39,7 @@ class MetricsRecorder(context: Context) {
 
     fun record(event: ExecutionEvent) {
         val ts = isoFmt.format(Date())
+        val s = event.decision.signals
         val cols = listOf(
             ts,
             event.taskId,
@@ -48,6 +49,21 @@ class MetricsRecorder(context: Context) {
             event.actualMs.toString(),
             event.resultSizeBytes.toString(),
             event.errorMessage ?: "",
+            // Rule + context signals — the columns the supervisor asked for
+            // so we can build evaluation charts (rule distribution, decision
+            // accuracy under varying battery / network conditions, etc.).
+            event.decision.rule,
+            s.batteryPercent.toString(),
+            s.isCharging.toString(),
+            s.networkType,
+            "%.3f".format(s.networkScore),
+            "%.1f".format(s.rttMs),
+            "%.1f".format(s.bandwidthMbps),
+            "%.1f".format(s.cpuUsagePercent),
+            s.isStable.toString(),
+            "%.1f".format(s.estLocalLatencyMs),
+            "%.1f".format(s.estRemoteLatencyMs),
+            "%.3f".format(s.computeSpeedup),
             event.decision.reasoning,
         )
         val line = cols.joinToString(",") { csvEscape(it) } + "\n"
@@ -62,6 +78,9 @@ class MetricsRecorder(context: Context) {
     companion object {
         private const val FILE_NAME = "mocca-metrics.csv"
         private const val HEADER =
-            "timestamp_iso,task_id,task_name,target,fell_back,actual_ms,result_bytes,error,reasoning"
+            "timestamp_iso,task_id,task_name,target,fell_back,actual_ms,result_bytes,error," +
+                "rule,battery_percent,is_charging,network_type,network_score," +
+                "rtt_ms,bandwidth_mbps,cpu_percent,is_stable," +
+                "est_local_ms,est_remote_ms,speedup,reasoning"
     }
 }

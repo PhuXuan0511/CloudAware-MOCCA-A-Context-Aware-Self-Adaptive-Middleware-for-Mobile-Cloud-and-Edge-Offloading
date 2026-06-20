@@ -9,7 +9,6 @@ import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.os.Build
 import android.os.Bundle
-import android.text.method.ScrollingMovementMethod
 import android.util.TypedValue
 import android.view.Gravity
 import android.view.View
@@ -23,6 +22,7 @@ import com.thesis.middleware.adaptation.ExecutionEvent
 import com.thesis.middleware.adaptation.OffloadableTask
 import com.thesis.middleware.context.ContextService
 import com.thesis.middleware.decision.ExecutionTarget
+import com.thesis.middleware.decision.SignalSnapshot
 import com.thesis.middleware.demo.DemoTasks
 import com.thesis.middleware.settings.SettingsActivity
 import kotlinx.coroutines.CoroutineScope
@@ -57,12 +57,14 @@ import java.util.Locale
 class MainActivity : Activity() {
 
     private lateinit var statusText: TextView
-    private lateinit var logText: TextView
+    private lateinit var logContainer: LinearLayout
+    private lateinit var logPlaceholder: TextView
 
     private val uiScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
     private var eventJob: Job? = null
 
-    private val logBuffer: ArrayDeque<String> = ArrayDeque()
+    // Track entry views so we can prune the oldest when the cap is reached.
+    private val logEntryViews: ArrayDeque<View> = ArrayDeque()
     private val timestampFmt = SimpleDateFormat("HH:mm:ss", Locale.US)
 
     // Per-task live aggregations. Keyed by `OffloadableTask.name` (wire name,
@@ -132,155 +134,378 @@ class MainActivity : Activity() {
     private fun appendLog(event: ExecutionEvent) {
         updateStats(event)
         val ts = timestampFmt.format(Date())
+        val s = event.decision.signals
         val where = describeWhere(event.decision.target, event.fellBackToLocal)
-        val took = "${event.actualMs} ms"
         val output = humanBytes(event.resultSizeBytes.toLong())
 
-        val plainWhy = humanizeReason(event.decision.reasoning, event.decision.target)
-        val detail = detailReason(event.decision.reasoning, event.decision.target)
-        val line = buildString {
-            append("[$ts]  ${event.taskName}\n")
-            append("   Ran on:  $where\n")
-            append("   Took:    $took\n")
-            append("   Output:  $output\n")
-            append("   Reason:  $plainWhy\n")
-            append("   Details: ").append(indentContinuation(detail))
-            event.errorMessage?.let { append("\n   Note:    remote failed → $it") }
+        // ── Compact summary (always visible — 4-5 lines) ──
+        val summary = buildString {
+            append("→ $where\n")
+            append("  ${event.actualMs} ms   ·   $output\n")
+            append("Rule: ${ruleDisplayName(event.decision.rule)}\n")
+            append("Why:  ${ruleExplanation(event.decision.rule, event.decision.target, s)}")
+            event.errorMessage?.let { append("\nNote: remote failed → $it") }
         }
-        pushLine(line)
+
+        // ── Details (collapsible — context + estimates + cost + chain) ──
+        val details = buildDetailsBlock(event, s)
+
+        pushEntryView(buildEntryView(ts, event.taskName, summary, details))
     }
 
     /**
-     * Translates the policy's structured reasoning into one short plain-English
-     * sentence the audience can follow without knowing what "mJ" or "speedup"
-     * means. The full technical reasoning is still shown below as "Details:".
+     * Builds the full details block (context + estimates + cost analysis +
+     * rule chain trace) as a monospace string. Shown only when the user
+     * taps "Show details" on the entry card.
      */
-    private fun humanizeReason(reasoning: String, target: ExecutionTarget): String {
-        val r = reasoning.lowercase(Locale.US)
-        return when {
-            r.startsWith("offline") ->
-                "No network — must run on the phone."
-            r.startsWith("battery critical") ->
-                "Battery too low to risk a radio transmission — stay on the phone."
-            r.startsWith("compute speedup") ->
-                "Server is barely faster than the phone — network overhead is not worth paying."
-            r.startsWith("user-patience") ->
-                "Local would take too long — offload to keep the user from waiting."
-            r.startsWith("energy-first") && target == ExecutionTarget.LOCAL ->
-                "Saving battery: local uses less energy than sending it over the radio."
-            r.startsWith("energy-first") ->
-                "Saving battery: offloading actually costs less energy than running locally."
-            r.startsWith("latency-first") && target == ExecutionTarget.LOCAL ->
-                "Plugged in / fast charge — local is already fast enough, skip the network hop."
-            r.startsWith("latency-first") ->
-                "Going for speed: the server can finish faster than the phone."
-            r.startsWith("balanced") && target == ExecutionTarget.LOCAL ->
-                "Local wins on the combined time-and-energy score."
-            r.startsWith("balanced") ->
-                "Offload wins on the combined time-and-energy score."
-            else -> "See details below."
+    private fun buildDetailsBlock(event: ExecutionEvent, s: SignalSnapshot): String =
+        buildString {
+            // Context
+            append("Context:\n")
+            append("  Battery:  ${s.batteryPercent}% ")
+            append(if (s.isCharging) "(charging)" else "(not charging)")
+            append("   ${batteryThresholdNote(s)}\n")
+            append("  Network:  ${s.networkType}  RTT ${s.rttMs.toInt()}ms  ")
+            append("~${s.bandwidthMbps.toInt()} Mbps  signal ${s.signalDbm} dBm\n")
+            append("            score ${"%.2f".format(s.networkScore)}   ")
+            append("${networkThresholdNote(s)}\n")
+            append("  CPU:      ${s.cpuUsagePercent.toInt()}% used  (${s.cpuCores} cores)\n")
+            append("  Mobility: ${if (s.isStable) "Stationary" else "Moving"}  ")
+            append("(${"%.2f".format(s.linearAccelMps2)} m/s²)\n")
+            append("  Task:     ${s.taskComplexity}   ${complexityThresholdNote(s)}\n\n")
+
+            // Estimates
+            append("Estimates:\n")
+            append("  Local:   ${s.estLocalLatencyMs.toInt()} ms  /  ")
+            append("${"%.1f".format(s.estLocalEnergyMj)} mJ\n")
+            append("  Remote:  ${s.estRemoteLatencyMs.toInt()} ms  /  ")
+            append("${"%.1f".format(s.estRemoteEnergyMj)} mJ\n")
+            append("  Speedup: ${"%.2fx".format(s.computeSpeedup)}   ")
+            append("${speedupThresholdNote(s)}\n\n")
+
+            // Cost analysis
+            val wLat = 0.5f
+            val wEng = 0.5f
+            val margin = 0.05f
+            val localCost  = wLat * s.estLocalLatencyMs  + wEng * s.estLocalEnergyMj
+            val remoteCost = wLat * s.estRemoteLatencyMs + wEng * s.estRemoteEnergyMj
+            val localWinsByCost = localCost <= remoteCost * (1f + margin)
+            val costWinner = if (localWinsByCost) "LOCAL" else "REMOTE"
+            val cheaperSide = if (localCost < remoteCost) "Local" else "Remote"
+            val cheaperPct = kotlin.math.abs(localCost - remoteCost) /
+                kotlin.math.max(localCost, remoteCost) * 100f
+
+            append("Cost analysis (w_lat=0.5, w_eng=0.5, margin=5%):\n")
+            append("  LocalCost  = 0.5 × ${s.estLocalLatencyMs.toInt()} + ")
+            append("0.5 × ${"%.1f".format(s.estLocalEnergyMj)} = ")
+            append("${"%.1f".format(localCost)}\n")
+            append("  RemoteCost = 0.5 × ${s.estRemoteLatencyMs.toInt()} + ")
+            append("0.5 × ${"%.1f".format(s.estRemoteEnergyMj)} = ")
+            append("${"%.1f".format(remoteCost)}\n")
+            append("  Δ: $cheaperSide is ${"%.1f".format(cheaperPct)}% cheaper ")
+            append("→ cost-only winner: $costWinner\n")
+
+            val targetIsLocal = event.decision.target == ExecutionTarget.LOCAL
+            val agrees = (localWinsByCost && targetIsLocal) ||
+                (!localWinsByCost && !targetIsLocal)
+            val agreementNote = when {
+                event.decision.rule == "BALANCED_COST" ->
+                    "[this rule IS the cost analysis]"
+                agrees ->
+                    "[cost-only winner matches the chosen target]"
+                else ->
+                    "[OVERRIDDEN by rule '${ruleDisplayName(event.decision.rule)}']"
+            }
+            append("  $agreementNote\n\n")
+
+            // Rule chain (renderRuleChain returns text ending with \n)
+            append(renderRuleChain(s, event.decision.rule).trimStart())
+        }
+
+    /**
+     * Builds one expandable entry card. Card shows:
+     *  - Header (bold timestamp + task name)
+     *  - Compact summary (4-5 lines, always visible)
+     *  - Toggle TextView ("▶ Show details" / "▼ Hide details")
+     *  - Details block (monospace, initially GONE)
+     */
+    private fun buildEntryView(
+        timestamp: String,
+        taskName: String,
+        summary: String,
+        details: String,
+    ): View {
+        val pad = dp(10f)
+
+        val header = TextView(this).apply {
+            text = "[$timestamp]  $taskName"
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+            setTextColor(Color.BLACK)
+            setTypeface(typeface, Typeface.BOLD)
+        }
+
+        val summaryView = TextView(this).apply {
+            text = summary
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
+            setTextColor(Color.DKGRAY)
+            typeface = Typeface.MONOSPACE
+            setPadding(0, dp(4f), 0, 0)
+        }
+
+        val detailsView = TextView(this).apply {
+            text = details
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 10f)
+            setTextColor(Color.DKGRAY)
+            typeface = Typeface.MONOSPACE
+            setPadding(0, dp(6f), 0, 0)
+            visibility = View.GONE
+        }
+
+        val toggle = TextView(this).apply {
+            text = "▶  Show details"
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
+            setTextColor(Color.parseColor("#1F4E79"))
+            setTypeface(typeface, Typeface.BOLD)
+            setPadding(0, dp(6f), 0, 0)
+            isClickable = true
+            isFocusable = true
+        }
+        toggle.setOnClickListener {
+            if (detailsView.visibility == View.GONE) {
+                detailsView.visibility = View.VISIBLE
+                toggle.text = "▼  Hide details"
+            } else {
+                detailsView.visibility = View.GONE
+                toggle.text = "▶  Show details"
+            }
+        }
+
+        return LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(pad, pad, pad, pad)
+            background = GradientDrawable().apply {
+                shape = GradientDrawable.RECTANGLE
+                cornerRadius = dp(6f).toFloat()
+                setColor(Color.parseColor("#F8F8F8"))
+                setStroke(dp(1f), Color.parseColor("#DDDDDD"))
+            }
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).apply { bottomMargin = dp(8f) }
+            addView(header)
+            addView(summaryView)
+            // Only attach toggle + details when there IS something to expand
+            // (skipped for error entries which carry summary only).
+            if (details.isNotEmpty()) {
+                addView(toggle)
+                addView(detailsView)
+            }
         }
     }
 
     /**
-     * Multi-line educational explanation. Decodes the raw policy reasoning so a
-     * non-technical reader can follow:
-     *  - which MAPE rule fired and why it exists
-     *  - what the numbers in the raw output (mJ, ms, speedup, cost) mean
-     *  - the threshold being compared against (e.g. 1.5× speedup floor, 3 s patience)
+     * Maps a [com.thesis.middleware.decision.policy.PolicyRule.id] to a short
+     * human-readable label rendered as the "Rule matched:" line.
+     */
+    private fun ruleDisplayName(ruleId: String): String = when (ruleId) {
+        "OFFLINE"                      -> "Offline → local execution"
+        "BATTERY_CRITICAL_SAFETY"      -> "Battery critical → keep local (safety)"
+        "UNSTABLE_NETWORK"             -> "Unstable network → local execution"
+        "COMPUTE_FLOOR_NOT_MET"        -> "Network overhead not worth it → keep local"
+        "LATENCY_SENSITIVE"            -> "Latency-sensitive task → edge"
+        "LOW_BATTERY_OFFLOAD"          -> "Low battery → offload to save CPU energy"
+        "HEAVY_COMPUTE_GOOD_BANDWIDTH" -> "Heavy compute + good bandwidth → edge/cloud"
+        "BALANCED_COST"                -> "Balanced cost (default)"
+        else                           -> ruleId
+    }
+
+    /**
+     * Plain-English explanation of why this rule fired. References the actual
+     * signal values from [s] so the audience sees the threshold being compared.
+     */
+    private fun ruleExplanation(
+        ruleId: String,
+        target: ExecutionTarget,
+        s: SignalSnapshot,
+    ): String = when (ruleId) {
+        "OFFLINE" ->
+            "No network — task must run on the phone."
+
+        "BATTERY_CRITICAL_SAFETY" ->
+            "Battery is ${s.batteryPercent}% and not charging — radio TX would " +
+                "be the highest-power state and could brown out the device. " +
+                "Keep work local for safety."
+
+        "UNSTABLE_NETWORK" ->
+            "Network aggregate score is ${"%.2f".format(s.networkScore)} — too " +
+                "weak to commit to a round-trip. Run locally to avoid timeouts."
+
+        "COMPUTE_FLOOR_NOT_MET" ->
+            "Server is only ${"%.2fx".format(s.computeSpeedup)} faster than the " +
+                "phone — network upload + RTT + download would erase the gain. " +
+                "Keep local."
+
+        "LATENCY_SENSITIVE" ->
+            "Task is LIGHT (interactive). Edge has the lowest RTT, so the " +
+                "round-trip finishes before local compute would — picking edge."
+
+        "LOW_BATTERY_OFFLOAD" -> {
+            val saved = (s.estLocalEnergyMj - s.estRemoteEnergyMj).coerceAtLeast(0f)
+            "Battery ${s.batteryPercent}% (not charging). Local CPU would burn " +
+                "${"%.1f".format(s.estLocalEnergyMj)} mJ vs " +
+                "${"%.1f".format(s.estRemoteEnergyMj)} mJ for the network round-trip " +
+                "→ offloading saves ~${"%.1f".format(saved)} mJ."
+        }
+
+        "HEAVY_COMPUTE_GOOD_BANDWIDTH" ->
+            "Task is HEAVY and network score ${"%.2f".format(s.networkScore)} " +
+                "means bandwidth is plenty. Server finishes " +
+                "${"%.2fx".format(s.computeSpeedup)} faster — offload to $target."
+
+        "BALANCED_COST" -> {
+            val local = (0.5f * s.estLocalLatencyMs + 0.5f * s.estLocalEnergyMj)
+            val remote = (0.5f * s.estRemoteLatencyMs + 0.5f * s.estRemoteEnergyMj)
+            "No named rule fired. Weighted cost = 0.5×latency + 0.5×energy " +
+                "(equal priority). Local ${"%.1f".format(local)} vs remote " +
+                "${"%.1f".format(remote)} → " +
+                if (target == ExecutionTarget.LOCAL) "local wins." else "$target wins."
+        }
+
+        else -> "Unknown rule id: $ruleId"
+    }
+
+    // ── Threshold-note helpers (inline annotations on the Context block) ──
+    //
+    // Each helper takes the current SignalSnapshot and returns a bracketed
+    // hint like "[15%/30% thresholds: healthy]" so the audience sees the
+    // raw signal AND its position relative to the policy thresholds —
+    // without needing to mentally remember the rule constants.
+
+    private fun batteryThresholdNote(s: SignalSnapshot): String {
+        return when {
+            s.isCharging -> "[charging — Rule 6 skipped]"
+            s.batteryPercent < 15 -> "[${s.batteryPercent}% < 15% critical → Rule 2 may fire]"
+            s.batteryPercent < 30 -> "[${s.batteryPercent}% < 30% low → Rule 6 may fire]"
+            else -> "[${s.batteryPercent}% ≥ 30% healthy: above critical 15% & low 30%]"
+        }
+    }
+
+    private fun networkThresholdNote(s: SignalSnapshot): String {
+        return when {
+            s.networkType == "NONE" -> "[OFFLINE → Rule 1 fires]"
+            s.networkScore < 0.30f ->
+                "[< 0.30 unstable → Rule 3 may fire]"
+            s.networkScore < 0.60f ->
+                "[≥ 0.30 stable, < 0.60 not good-bandwidth]"
+            else ->
+                "[≥ 0.60 good bandwidth → Rule 7 may fire for HEAVY tasks]"
+        }
+    }
+
+    private fun complexityThresholdNote(s: SignalSnapshot): String {
+        return when (s.taskComplexity) {
+            "LIGHT" -> "[LIGHT → may trigger Rule 5 (latency-sensitive → edge)]"
+            "MEDIUM" -> "[MEDIUM → no complexity-specific rule, falls to Rule 8]"
+            "HEAVY" -> "[HEAVY → may trigger Rule 7 (heavy compute → edge/cloud)]"
+            else -> "[unknown complexity]"
+        }
+    }
+
+    private fun speedupThresholdNote(s: SignalSnapshot): String {
+        return if (s.computeSpeedup < 1.50f) {
+            "[< 1.50× → Rule 4 (negligible speedup) may fire]"
+        } else {
+            "[≥ 1.50× compute floor met → offloading is worthwhile]"
+        }
+    }
+
+    /**
+     * Renders the full rule chain trace. For each of the 8 rules in priority
+     * order, shows:
+     *   - skip   (rule didn't fire because condition was false)
+     *   - FIRED  (this rule won — explanation inline)
+     *   - —      (not evaluated because an earlier rule already fired)
      *
-     * Returned string uses `\n` between lines; the caller indents continuation
-     * lines so they align under the "Details:" column on screen.
+     * The audience can read top-to-bottom and follow exactly which rules
+     * were checked, which conditions held, and which rule won.
      */
-    private fun detailReason(reasoning: String, target: ExecutionTarget): String {
-        val r = reasoning.lowercase(Locale.US)
-        return when {
-            r.startsWith("offline") -> listOf(
-                "Network monitor reports no working connection (Wi-Fi off / no signal).",
-                "With no path to a server, offload is impossible — task runs on the phone CPU.",
-                "Raw policy output: $reasoning",
-            )
+    private fun renderRuleChain(s: SignalSnapshot, firedRule: String): String {
+        data class RuleCheck(val id: String, val displayName: String, val explanation: String)
 
-            r.startsWith("battery critical") -> listOf(
-                "Trigger: battery < 15% AND unplugged → ENERGY_FIRST mode + safety guard.",
-                "Radio TX (Wi-Fi/cellular) is the highest-power state on a phone — a burst",
-                "can brown out a weak battery. We trade some speed for device reliability.",
-                "Raw policy output: $reasoning",
-            )
+        // Derived booleans matching the actual policy logic.
+        // (criticalBattery / lowBattery thresholds are checked inline in the
+        // RuleCheck explanations below rather than via these locals.)
+        val online = s.networkType != "NONE"
+        val unstable = s.networkScore < 0.30f
+        val belowFloor = s.computeSpeedup < 1.50f
+        val light = s.taskComplexity == "LIGHT"
+        val heavy = s.taskComplexity == "HEAVY"
+        val remoteCheaperEnergy = s.estRemoteEnergyMj < s.estLocalEnergyMj
+        val goodBw = s.networkScore >= 0.60f
 
-            r.startsWith("compute speedup") -> listOf(
-                "Guardrail: compute-benefit floor (minimum 1.5× server speedup required).",
-                "The server's CPU is only marginally faster than the phone on pure compute,",
-                "so the network round-trip (upload + RTT + download) would erase the gain.",
-                "Below the floor → keep local.",
-                "Raw policy output: $reasoning",
-            )
+        val rules = listOf(
+            RuleCheck("OFFLINE", "OFFLINE",
+                if (online) "network online (${s.networkType})"
+                else "no network → OFFLINE"),
+            RuleCheck("BATTERY_CRITICAL_SAFETY", "BATTERY_CRITICAL_SAFETY",
+                when {
+                    s.isCharging -> "charging — guardrail skipped"
+                    s.batteryPercent >= 15 -> "${s.batteryPercent}% ≥ 15% threshold"
+                    else -> "${s.batteryPercent}% < 15% AND not charging"
+                }),
+            RuleCheck("UNSTABLE_NETWORK", "UNSTABLE_NETWORK",
+                if (unstable) "score ${"%.2f".format(s.networkScore)} < 0.30"
+                else "score ${"%.2f".format(s.networkScore)} ≥ 0.30"),
+            RuleCheck("NEGLIGIBLE_SPEEDUP", "NEGLIGIBLE_SPEEDUP / COMPUTE_FLOOR_NOT_MET",
+                if (belowFloor) "speedup ${"%.2f".format(s.computeSpeedup)}× < 1.50×"
+                else "speedup ${"%.2f".format(s.computeSpeedup)}× ≥ 1.50×"),
+            RuleCheck("LATENCY_SENSITIVE", "LATENCY_SENSITIVE",
+                if (light) "task is LIGHT (interactive)"
+                else "task is ${s.taskComplexity} ≠ LIGHT"),
+            RuleCheck("LOW_BATTERY_OFFLOAD", "LOW_BATTERY_OFFLOAD",
+                when {
+                    s.isCharging -> "charging"
+                    s.batteryPercent >= 30 -> "${s.batteryPercent}% ≥ 30% threshold"
+                    !remoteCheaperEnergy -> "remote energy ≥ local energy"
+                    else -> "${s.batteryPercent}% < 30% AND remote cheaper"
+                }),
+            RuleCheck("HEAVY_COMPUTE_GOOD_BANDWIDTH", "HEAVY_COMPUTE_GOOD_BANDWIDTH",
+                when {
+                    !heavy -> "task ${s.taskComplexity} ≠ HEAVY"
+                    !goodBw -> "score ${"%.2f".format(s.networkScore)} < 0.60"
+                    else -> "HEAVY + score ${"%.2f".format(s.networkScore)} ≥ 0.60"
+                }),
+            RuleCheck("BALANCED_COST", "BALANCED_COST",
+                "default fallback (always applicable)"),
+        )
 
-            r.startsWith("user-patience") -> listOf(
-                "Guardrail: user-patience override (local exec > 3000 ms threshold).",
-                "Even when ENERGY_FIRST would prefer local, blocking the user for 3+ seconds",
-                "hurts UX more than the battery cost. Forced offload (battery is not critical).",
-                "Raw policy output: $reasoning",
-            )
-
-            r.startsWith("energy-first") && target == ExecutionTarget.LOCAL -> listOf(
-                "Mode: ENERGY_FIRST (battery low, not charging).",
-                "Estimator compared local CPU energy vs radio TX energy (in millijoules, mJ).",
-                "Local won — task is light enough that radio transmission would cost more.",
-                "Raw policy output: $reasoning",
-            )
-
-            r.startsWith("energy-first") -> listOf(
-                "Mode: ENERGY_FIRST (battery low, not charging).",
-                "Estimator compared local CPU energy vs radio TX energy (in millijoules, mJ).",
-                "Task is heavy enough that running it locally would burn more battery than",
-                "transmitting it — so offload actually saves energy overall.",
-                "Raw policy output: $reasoning",
-            )
-
-            r.startsWith("latency-first") && target == ExecutionTarget.LOCAL -> listOf(
-                "Mode: LATENCY_FIRST (phone charging — energy is effectively free).",
-                "With energy off the table we optimize purely for wall-clock time.",
-                "Local CPU finishes faster than network round-trip + server compute → stay local.",
-                "Raw policy output: $reasoning",
-            )
-
-            r.startsWith("latency-first") -> listOf(
-                "Mode: LATENCY_FIRST (phone charging — energy is effectively free).",
-                "With energy off the table we optimize purely for wall-clock time.",
-                "Server finishes faster than the phone (incl. network round-trip) → offload.",
-                "Raw policy output: $reasoning",
-            )
-
-            r.startsWith("balanced") && target == ExecutionTarget.LOCAL -> listOf(
-                "Mode: BALANCED (default — battery healthy, not charging).",
-                "Formula: cost = 0.6 × latency_ms + 0.4 × energy_mJ (lower wins).",
-                "Local's weighted score is lower → keep work on the phone.",
-                "Raw policy output: $reasoning",
-            )
-
-            r.startsWith("balanced") -> listOf(
-                "Mode: BALANCED (default — battery healthy, not charging).",
-                "Formula: cost = 0.6 × latency_ms + 0.4 × energy_mJ (lower wins).",
-                "Remote's weighted score is lower → send work to the server.",
-                "Raw policy output: $reasoning",
-            )
-
-            else -> listOf(reasoning)
-        }.joinToString("\n")
+        val firedIdx = rules.indexOfFirst { it.id == firedRule }.let {
+            if (it == -1) rules.size - 1 else it
+        }
+        val sb = StringBuilder("   Rule chain trace:\n")
+        for ((i, check) in rules.withIndex()) {
+            val status: String = when {
+                i < firedIdx -> "skip "
+                i == firedIdx -> "FIRED"
+                else          -> "—    "
+            }
+            val nameCol = check.displayName.padEnd(32)
+            sb.append("     ${i + 1} ").append(nameCol).append("  ")
+            sb.append(status).append("  (")
+            sb.append(if (i > firedIdx) "not evaluated — rule ${firedIdx + 1} won"
+                      else check.explanation)
+            sb.append(")\n")
+        }
+        sb.append("\n")
+        return sb.toString()
     }
-
-    /** Prefix every line *after the first* with 12 spaces so it aligns under "Details: ". */
-    private fun indentContinuation(text: String): String =
-        text.lineSequence().joinToString("\n            ")
 
     private fun appendError(task: OffloadableTask, t: Throwable) {
         val ts = timestampFmt.format(Date())
-        pushLine(
-            "[$ts]  ${task.name}\n" +
-                "   Failed:  ${t.javaClass.simpleName}\n" +
-                "   Details: ${t.message ?: "(no message)"}"
-        )
+        val summary = "✗  ${t.javaClass.simpleName}\n${t.message ?: "(no message)"}"
+        // No details to expand for errors — pass empty string.
+        pushEntryView(buildEntryView(ts, task.name, summary, details = ""))
     }
 
     /**
@@ -375,10 +600,21 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun pushLine(line: String) {
-        logBuffer.addFirst(line)
-        while (logBuffer.size > MAX_LOG_LINES) logBuffer.removeLast()
-        logText.text = logBuffer.joinToString("\n\n")
+    /**
+     * Inserts an entry view at the top of [logContainer] and prunes the
+     * oldest entries when the cap is reached. Removes the placeholder TextView
+     * on first entry.
+     */
+    private fun pushEntryView(entryView: View) {
+        if (logContainer.indexOfChild(logPlaceholder) >= 0) {
+            logContainer.removeView(logPlaceholder)
+        }
+        logContainer.addView(entryView, 0)
+        logEntryViews.addFirst(entryView)
+        while (logEntryViews.size > MAX_LOG_LINES) {
+            val oldest = logEntryViews.removeLast()
+            logContainer.removeView(oldest)
+        }
     }
 
     private fun buildLayout(): View {
@@ -388,13 +624,19 @@ class MainActivity : Activity() {
             setTextColor(Color.DKGRAY)
             setPadding(pad, pad, pad, pad / 2)
         }
-        logText = TextView(this).apply {
+        // Placeholder shown only when no entries logged yet.
+        logPlaceholder = TextView(this).apply {
             textSize = 12f
             setTextColor(Color.DKGRAY)
             typeface = Typeface.MONOSPACE
             setPadding(pad, pad, pad, pad)
-            movementMethod = ScrollingMovementMethod()
             text = getString(R.string.main_log_placeholder)
+        }
+        // Vertical container that holds one collapsible card per entry.
+        logContainer = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(pad, 0, pad, pad)
+            addView(logPlaceholder)
         }
 
         // ── Task dashboard row ──────────────────────────────────────────────
@@ -433,7 +675,7 @@ class MainActivity : Activity() {
         }
 
         val logScroll = ScrollView(this).apply {
-            addView(logText)
+            addView(logContainer)
             layoutParams = LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 0,

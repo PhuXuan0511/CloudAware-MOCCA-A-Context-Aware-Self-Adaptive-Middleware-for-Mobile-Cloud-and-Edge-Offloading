@@ -13,9 +13,13 @@ __pycache__/
 *.py[cod]
 .venv/
 venv/
+.venv-evaluation/
 *.egg-info/
 dist/
 .env
+
+# Jupyter
+.ipynb_checkpoints/
 
 # Docker
 *.log

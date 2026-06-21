@@ -10,10 +10,13 @@ import android.view.ViewGroup
 import android.widget.Button
 import android.widget.EditText
 import android.widget.LinearLayout
+import android.widget.RadioButton
+import android.widget.RadioGroup
 import android.widget.TextView
 import android.widget.Toast
 import com.thesis.middleware.MiddlewareApp
 import com.thesis.middleware.R
+import com.thesis.middleware.adaptation.ExecutionMode
 import com.thesis.middleware.context.ContextService
 
 /**
@@ -31,6 +34,10 @@ class SettingsActivity : Activity() {
 
     private lateinit var edgeField: EditText
     private lateinit var cloudField: EditText
+    private lateinit var modeGroup: RadioGroup
+    private var adaptiveId: Int = 0
+    private var localOnlyId: Int = 0
+    private var cloudOnlyId: Int = 0
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -40,6 +47,7 @@ class SettingsActivity : Activity() {
         val app = application as MiddlewareApp
         edgeField.setText(app.endpointsRepository.edgeUrl)
         cloudField.setText(app.endpointsRepository.cloudUrl)
+        modeGroup.check(modeRadioId(app.endpointsRepository.executionMode))
     }
 
     private fun onSave() {
@@ -53,6 +61,7 @@ class SettingsActivity : Activity() {
         val app = application as MiddlewareApp
         app.endpointsRepository.edgeUrl = edge
         app.endpointsRepository.cloudUrl = cloud
+        app.endpointsRepository.executionMode = selectedMode()
 
         // Live-mutate the running ConnectionManager so future probes / requests
         // use the new endpoints without waiting for a process restart.
@@ -66,6 +75,18 @@ class SettingsActivity : Activity() {
 
         Toast.makeText(this, R.string.settings_saved, Toast.LENGTH_SHORT).show()
         finish()
+    }
+
+    private fun modeRadioId(mode: ExecutionMode): Int = when (mode) {
+        ExecutionMode.ADAPTIVE   -> adaptiveId
+        ExecutionMode.LOCAL_ONLY -> localOnlyId
+        ExecutionMode.CLOUD_ONLY -> cloudOnlyId
+    }
+
+    private fun selectedMode(): ExecutionMode = when (modeGroup.checkedRadioButtonId) {
+        localOnlyId -> ExecutionMode.LOCAL_ONLY
+        cloudOnlyId -> ExecutionMode.CLOUD_ONLY
+        else        -> ExecutionMode.ADAPTIVE
     }
 
     private fun isValidUrl(s: String): Boolean =
@@ -87,6 +108,29 @@ class SettingsActivity : Activity() {
         edgeField = urlField()
         cloudField = urlField()
 
+        // Execution mode radio group — Adaptive / Local-only / Cloud-only
+        adaptiveId = View.generateViewId()
+        localOnlyId = View.generateViewId()
+        cloudOnlyId = View.generateViewId()
+        modeGroup = RadioGroup(this).apply {
+            orientation = RadioGroup.VERTICAL
+            addView(RadioButton(this@SettingsActivity).apply {
+                id = adaptiveId
+                text = ExecutionMode.ADAPTIVE.displayName
+                textSize = 13f
+            })
+            addView(RadioButton(this@SettingsActivity).apply {
+                id = localOnlyId
+                text = ExecutionMode.LOCAL_ONLY.displayName
+                textSize = 13f
+            })
+            addView(RadioButton(this@SettingsActivity).apply {
+                id = cloudOnlyId
+                text = ExecutionMode.CLOUD_ONLY.displayName
+                textSize = 13f
+            })
+        }
+
         val saveButton = Button(this).apply {
             setText(R.string.settings_save)
             setOnClickListener { onSave() }
@@ -104,6 +148,8 @@ class SettingsActivity : Activity() {
             addView(edgeField)
             addView(label(R.string.settings_cloud_label))
             addView(cloudField)
+            addView(label(R.string.settings_mode_label))
+            addView(modeGroup)
             addView(saveButton)
         }
     }

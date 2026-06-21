@@ -19,10 +19,9 @@ import com.thesis.middleware.decision.TaskAnalysis
  *                                           ([PolicyRule.HEAVY_COMPUTE_GOOD_BANDWIDTH])
  *   4. Latency-sensitive task → edge        ([PolicyRule.LATENCY_SENSITIVE])
  *
- * Plus three guardrails that sit above the teacher's rules:
+ * Plus two guardrails that sit above the teacher's rules:
  *
  *   - [PolicyRule.OFFLINE]                  — no network at all
- *   - [PolicyRule.BATTERY_CRITICAL_SAFETY]  — radio TX could brown out the device
  *   - [PolicyRule.COMPUTE_FLOOR_NOT_MET]    — server barely faster than phone
  *
  * And a default fallback:
@@ -38,7 +37,6 @@ class OffloadingPolicy(
     private val latencyWeight: Float = DEFAULT_LATENCY_WEIGHT,
     private val energyWeight: Float = DEFAULT_ENERGY_WEIGHT,
     private val minComputeSpeedup: Float = DEFAULT_MIN_COMPUTE_SPEEDUP,
-    private val criticalBatteryPercent: Int = CRITICAL_BATTERY_PERCENT,
     private val lowBatteryPercent: Int = LOW_BATTERY_PERCENT,
     private val unstableNetworkThreshold: Float = UNSTABLE_NETWORK_THRESHOLD,
     private val goodBandwidthThreshold: Float = GOOD_BANDWIDTH_THRESHOLD,
@@ -49,10 +47,6 @@ class OffloadingPolicy(
             "latencyWeight + energyWeight must sum to 1.0 " +
                 "(got ${latencyWeight + energyWeight})"
         }
-        require(criticalBatteryPercent < lowBatteryPercent) {
-            "criticalBatteryPercent ($criticalBatteryPercent) must be " +
-                "less than lowBatteryPercent ($lowBatteryPercent)"
-        }
     }
 
     fun evaluate(analysis: TaskAnalysis): OffloadingPlan {
@@ -61,7 +55,6 @@ class OffloadingPolicy(
         val signals = buildSignalSnapshot(analysis, speedup)
 
         return applyOffline(analysis, signals)
-            ?: applyBatteryCriticalSafety(analysis, signals)
             ?: applyUnstableNetwork(analysis, signals)
             ?: applyComputeFloorGuardrail(analysis, signals, speedup)
             ?: applyLatencySensitive(analysis, signals)
@@ -78,18 +71,6 @@ class OffloadingPolicy(
             target = ExecutionTarget.LOCAL,
             rule = PolicyRule.OFFLINE.id,
             reasoning = "offline — no network connection",
-            signals = s,
-        )
-    }
-
-    private fun applyBatteryCriticalSafety(a: TaskAnalysis, s: SignalSnapshot): OffloadingPlan? {
-        val battery = a.features.rawSnapshot.battery
-        if (battery.isCharging || battery.levelPercent >= criticalBatteryPercent) return null
-        return OffloadingPlan(
-            target = ExecutionTarget.LOCAL,
-            rule = PolicyRule.BATTERY_CRITICAL_SAFETY.id,
-            reasoning = "battery critical %d%% — keep local (radio TX brown-out risk)"
-                .format(battery.levelPercent),
             signals = s,
         )
     }
@@ -293,9 +274,6 @@ class OffloadingPolicy(
         private const val LOW_BATTERY_PERCENT = 30
 
         // ── Guardrail thresholds ───────────────────────────────────────
-        // Below this battery percent (and not charging) we KEEP work local
-        // to avoid radio TX brown-out — radio is the highest-power state.
-        private const val CRITICAL_BATTERY_PERCENT = 15
         // Server must be at least this much faster on pure compute work
         // for any network overhead to be worth paying.
         private const val DEFAULT_MIN_COMPUTE_SPEEDUP = 1.5f
@@ -325,10 +303,6 @@ enum class PolicyRule(val id: String, val displayName: String) {
     OFFLINE(
         id = "OFFLINE",
         displayName = "Offline → local execution",
-    ),
-    BATTERY_CRITICAL_SAFETY(
-        id = "BATTERY_CRITICAL_SAFETY",
-        displayName = "Battery critical → keep local (radio TX safety)",
     ),
     UNSTABLE_NETWORK(
         id = "UNSTABLE_NETWORK",

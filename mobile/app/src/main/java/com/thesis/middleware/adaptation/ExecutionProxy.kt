@@ -33,6 +33,14 @@ class ExecutionProxy(
     private val mapeLoop: MapeLoop,
     private val offloadingClient: OffloadingClient,
     private val remoteTimeoutMs: Long = DEFAULT_REMOTE_TIMEOUT_MS,
+    /**
+     * Returns the current execution mode each time a task is submitted.
+     * Read on every [run] call so a mode change from the Settings screen
+     * takes effect immediately without restarting the service.
+     *
+     * Default returns [ExecutionMode.ADAPTIVE] — full MAPE behaviour.
+     */
+    private val modeProvider: () -> ExecutionMode = { ExecutionMode.ADAPTIVE },
 ) {
 
     private val _events = MutableSharedFlow<ExecutionEvent>(
@@ -43,35 +51,64 @@ class ExecutionProxy(
 
     suspend fun run(task: OffloadableTask): ByteArray {
         val startMs = System.currentTimeMillis()
-        val decision = mapeLoop.decide(task)
-        Log.d(TAG, "task=${task.id} target=${decision.target} reason=${decision.reasoning}")
+        val mode = modeProvider()
+        // Always run MAPE Analyze (estimator + signals) so the log entry has a
+        // populated context snapshot even in baseline modes. The Plan-phase
+        // output (target/rule) is overridden below when mode != ADAPTIVE.
+        val natural = mapeLoop.decide(task)
+        val decision: OffloadingDecision = when (mode) {
+            ExecutionMode.ADAPTIVE -> natural
+            ExecutionMode.LOCAL_ONLY -> natural.copy(
+                shouldOffload = false,
+                target = ExecutionTarget.LOCAL,
+                rule = "FORCED_LOCAL",
+                reasoning = "execution mode = LOCAL_ONLY — MAPE bypassed for baseline comparison",
+            )
+            ExecutionMode.CLOUD_ONLY -> natural.copy(
+                shouldOffload = true,
+                target = ExecutionTarget.CLOUD,
+                rule = "FORCED_CLOUD",
+                reasoning = "execution mode = CLOUD_ONLY — MAPE bypassed, no fallback (baseline)",
+            )
+        }
+        Log.d(TAG, "task=${task.id} mode=$mode target=${decision.target} rule=${decision.rule}")
 
         var fellBack = false
         var errorMessage: String? = null
 
-        val result: ByteArray = if (decision.target == ExecutionTarget.LOCAL) {
-            task.execute()
-        } else {
-            try {
-                withTimeout(remoteTimeoutMs) {
-                    when (decision.target) {
-                        ExecutionTarget.EDGE -> offloadingClient.submitToEdge(task)
-                        ExecutionTarget.CLOUD -> offloadingClient.submitToCloud(task)
-                        ExecutionTarget.LOCAL -> task.execute() // unreachable; satisfies the compiler
+        val result: ByteArray = when {
+            // CLOUD_ONLY baseline: no fallback — exception propagates to caller
+            // so the audience can see how fragile a cloud-only design is when
+            // the network goes down.
+            mode == ExecutionMode.CLOUD_ONLY -> {
+                withTimeout(remoteTimeoutMs) { offloadingClient.submitToCloud(task) }
+            }
+            // LOCAL_ONLY baseline: always run on the phone.
+            mode == ExecutionMode.LOCAL_ONLY -> task.execute()
+            // ADAPTIVE: full behaviour with timeout + fallback to local.
+            decision.target == ExecutionTarget.LOCAL -> task.execute()
+            else -> {
+                try {
+                    withTimeout(remoteTimeoutMs) {
+                        when (decision.target) {
+                            ExecutionTarget.EDGE -> offloadingClient.submitToEdge(task)
+                            ExecutionTarget.CLOUD -> offloadingClient.submitToCloud(task)
+                            ExecutionTarget.LOCAL -> task.execute()
+                        }
                     }
+                } catch (e: TimeoutCancellationException) {
+                    Log.w(TAG, "remote ${decision.target} timed out after ${remoteTimeoutMs}ms — running local")
+                    fellBack = true
+                    errorMessage = "timeout after ${remoteTimeoutMs}ms"
+                    task.execute()
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    Log.w(TAG, "remote ${decision.target} failed: ${e.message} — running local")
+                    fellBack = true
+                    errorMessage = "${e.javaClass.simpleName}: ${e.message ?: "unknown"}"
+                    task.execute()
                 }
-            } catch (e: TimeoutCancellationException) {
-                Log.w(TAG, "remote ${decision.target} timed out after ${remoteTimeoutMs}ms — running local")
-                fellBack = true
-                errorMessage = "timeout after ${remoteTimeoutMs}ms"
-                task.execute()
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: Exception) {
-                Log.w(TAG, "remote ${decision.target} failed: ${e.message} — running local")
-                fellBack = true
-                errorMessage = "${e.javaClass.simpleName}: ${e.message ?: "unknown"}"
-                task.execute()
             }
         }
 

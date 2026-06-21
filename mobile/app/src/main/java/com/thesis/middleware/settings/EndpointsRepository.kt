@@ -2,6 +2,7 @@ package com.thesis.middleware.settings
 
 import android.content.Context
 import android.content.SharedPreferences
+import com.thesis.middleware.adaptation.ExecutionMode
 
 /**
  * Persists the edge/cloud base URLs across app launches so the user can
@@ -25,6 +26,16 @@ class EndpointsRepository(context: Context) {
         get() = prefs.getString(KEY_CLOUD, DEFAULT_CLOUD)!!
         set(value) { prefs.edit().putString(KEY_CLOUD, value.trim().trimEnd('/')).apply() }
 
+    /**
+     * Runtime execution mode. Read on every task submission so changes from
+     * the Settings screen take effect immediately for the next tap.
+     */
+    var executionMode: ExecutionMode
+        get() = runCatching {
+            ExecutionMode.valueOf(prefs.getString(KEY_MODE, ExecutionMode.ADAPTIVE.name)!!)
+        }.getOrDefault(ExecutionMode.ADAPTIVE)
+        set(value) { prefs.edit().putString(KEY_MODE, value.name).apply() }
+
     companion object {
         const val DEFAULT_EDGE = "http://10.0.2.2:8001"
         const val DEFAULT_CLOUD = "http://10.0.2.2:8002"
@@ -32,5 +43,6 @@ class EndpointsRepository(context: Context) {
         private const val PREFS_NAME = "mocca.endpoints"
         private const val KEY_EDGE = "edge_url"
         private const val KEY_CLOUD = "cloud_url"
+        private const val KEY_MODE = "execution_mode"
     }
 }

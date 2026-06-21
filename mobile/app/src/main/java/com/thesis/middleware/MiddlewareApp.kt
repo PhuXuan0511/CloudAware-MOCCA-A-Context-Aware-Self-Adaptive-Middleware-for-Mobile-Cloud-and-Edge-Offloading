@@ -75,7 +75,13 @@ class MiddlewareApp : Application() {
     }
 
     val executionProxy: ExecutionProxy by lazy {
-        ExecutionProxy(mapeLoop = mapeLoop, offloadingClient = offloadingClient)
+        ExecutionProxy(
+            mapeLoop = mapeLoop,
+            offloadingClient = offloadingClient,
+            // Read the persisted mode on every task — Settings changes take
+            // effect immediately for the next tap, no service restart needed.
+            modeProvider = { endpointsRepository.executionMode },
+        )
     }
 
     override fun onTerminate() {

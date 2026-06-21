@@ -310,13 +310,14 @@ class MainActivity : Activity() {
      */
     private fun ruleDisplayName(ruleId: String): String = when (ruleId) {
         "OFFLINE"                      -> "Offline → local execution"
-        "BATTERY_CRITICAL_SAFETY"      -> "Battery critical → keep local (safety)"
         "UNSTABLE_NETWORK"             -> "Unstable network → local execution"
         "COMPUTE_FLOOR_NOT_MET"        -> "Network overhead not worth it → keep local"
         "LATENCY_SENSITIVE"            -> "Latency-sensitive task → edge"
         "LOW_BATTERY_OFFLOAD"          -> "Low battery → offload to save CPU energy"
         "HEAVY_COMPUTE_GOOD_BANDWIDTH" -> "Heavy compute + good bandwidth → edge/cloud"
         "BALANCED_COST"                -> "Balanced cost (default)"
+        "FORCED_LOCAL"                 -> "Local-only mode (baseline — MAPE bypassed)"
+        "FORCED_CLOUD"                 -> "Cloud-only mode (baseline — no fallback)"
         else                           -> ruleId
     }
 
@@ -332,10 +333,16 @@ class MainActivity : Activity() {
         "OFFLINE" ->
             "No network — task must run on the phone."
 
-        "BATTERY_CRITICAL_SAFETY" ->
-            "Battery is ${s.batteryPercent}% and not charging — radio TX would " +
-                "be the highest-power state and could brown out the device. " +
-                "Keep work local for safety."
+        "FORCED_LOCAL" ->
+            "Execution mode is set to LOCAL_ONLY in Settings. The MAPE rule " +
+                "chain was bypassed and the task ran on the phone CPU. Used " +
+                "as a baseline to compare against adaptive offloading."
+
+        "FORCED_CLOUD" ->
+            "Execution mode is set to CLOUD_ONLY in Settings. The MAPE rule " +
+                "chain was bypassed and the task was sent to the cloud. No " +
+                "fallback — network failure surfaces as an error (intentional " +
+                "baseline to highlight MOCCA's resilience advantage)."
 
         "UNSTABLE_NETWORK" ->
             "Network aggregate score is ${"%.2f".format(s.networkScore)} — too " +
@@ -384,10 +391,11 @@ class MainActivity : Activity() {
 
     private fun batteryThresholdNote(s: SignalSnapshot): String {
         return when {
-            s.isCharging -> "[charging — Rule 6 skipped]"
-            s.batteryPercent < 15 -> "[${s.batteryPercent}% < 15% critical → Rule 2 may fire]"
-            s.batteryPercent < 30 -> "[${s.batteryPercent}% < 30% low → Rule 6 may fire]"
-            else -> "[${s.batteryPercent}% ≥ 30% healthy: above critical 15% & low 30%]"
+            s.isCharging -> "[charging — LOW_BATTERY_OFFLOAD skipped]"
+            s.batteryPercent < 30 ->
+                "[${s.batteryPercent}% < 30% low → LOW_BATTERY_OFFLOAD may fire]"
+            else ->
+                "[${s.batteryPercent}% ≥ 30% healthy: above low-battery threshold]"
         }
     }
 
@@ -448,12 +456,6 @@ class MainActivity : Activity() {
             RuleCheck("OFFLINE", "OFFLINE",
                 if (online) "network online (${s.networkType})"
                 else "no network → OFFLINE"),
-            RuleCheck("BATTERY_CRITICAL_SAFETY", "BATTERY_CRITICAL_SAFETY",
-                when {
-                    s.isCharging -> "charging — guardrail skipped"
-                    s.batteryPercent >= 15 -> "${s.batteryPercent}% ≥ 15% threshold"
-                    else -> "${s.batteryPercent}% < 15% AND not charging"
-                }),
             RuleCheck("UNSTABLE_NETWORK", "UNSTABLE_NETWORK",
                 if (unstable) "score ${"%.2f".format(s.networkScore)} < 0.30"
                 else "score ${"%.2f".format(s.networkScore)} ≥ 0.30"),

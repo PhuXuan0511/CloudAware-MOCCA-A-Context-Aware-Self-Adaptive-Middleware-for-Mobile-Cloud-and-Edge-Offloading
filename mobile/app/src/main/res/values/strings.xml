@@ -28,6 +28,8 @@
     <string name="settings_mode_label">Execution mode (for baseline comparison)</string>
     <string name="settings_debug_network_label">Debug: Force network score (0.00–1.00, blank = real sensor)</string>
     <string name="settings_debug_network_hint">e.g. 0.15 triggers UNSTABLE_NETWORK</string>
+    <string name="settings_debug_speedup_label">Debug: Force compute speedup (e.g. 0.50, blank = real estimator)</string>
+    <string name="settings_debug_speedup_hint">e.g. 0.50 triggers COMPUTE_FLOOR_NOT_MET; 2.00 skips it</string>
     <string name="settings_save">Save</string>
     <string name="settings_saved">Endpoints saved — service restarted.</string>
     <string name="settings_invalid_url">URL must start with http:// or https://</string>

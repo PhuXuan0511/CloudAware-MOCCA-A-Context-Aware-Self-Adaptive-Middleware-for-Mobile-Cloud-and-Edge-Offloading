@@ -46,7 +46,9 @@ class MiddlewareApp : Application() {
     private val policy: OffloadingPolicy by lazy { OffloadingPolicy() }
 
     val mapeLoop: MapeLoop by lazy {
-        MapeLoop(contextManager = contextManager, scope = appScope, policy = policy)
+        MapeLoop(contextManager = contextManager, scope = appScope, policy = policy).also { ml ->
+            ml.debugSpeedup = endpointsRepository.debugSpeedup
+        }
     }
 
     // ── Adaptation layer ──────────────────────────────────────────────────

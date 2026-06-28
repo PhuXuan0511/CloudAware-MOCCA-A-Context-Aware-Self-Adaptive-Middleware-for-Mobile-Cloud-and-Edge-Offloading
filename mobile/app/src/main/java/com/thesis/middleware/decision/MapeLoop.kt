@@ -104,9 +104,20 @@ class MapeLoop(
         return deferred
     }
 
+    /**
+     * Debug-only: when non-null, forces a specific compute speedup value
+     * (localExecTime / remoteExecTime) so any policy rule that checks the
+     * speedup threshold can be demonstrated without specific network conditions.
+     * Set to null to restore real estimator values.
+     */
+    var debugSpeedup: Float? = null
+
     private fun runMape(task: OffloadableTask): OffloadingDecision {
         val features = contextManager.getLatestFeatures()      // M
-        val analysis = analyze(task, features)                  // A
+        val rawAnalysis = analyze(task, features)               // A
+        val analysis = debugSpeedup?.let { s ->
+            rawAnalysis.copy(remoteExecTimeMs = rawAnalysis.localExecTimeMs / s.coerceAtLeast(0.01f))
+        } ?: rawAnalysis
         val plan = plan(analysis)                               // P
         return execute(plan)                                    // E
     }

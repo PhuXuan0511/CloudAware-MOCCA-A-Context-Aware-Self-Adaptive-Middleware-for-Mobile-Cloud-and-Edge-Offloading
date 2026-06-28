@@ -51,6 +51,20 @@ class EndpointsRepository(context: Context) {
             prefs.edit().putFloat(KEY_DEBUG_NETWORK, value ?: SENTINEL).apply()
         }
 
+    /**
+     * Debug-only: when non-null, MapeLoop replaces the computed speedup with
+     * this value so the audience can see any rule fire regardless of real
+     * network conditions. Set to null to restore real estimates. -1f = no override.
+     */
+    var debugSpeedup: Float?
+        get() {
+            val stored = prefs.getFloat(KEY_DEBUG_SPEEDUP, SENTINEL)
+            return if (stored < 0f) null else stored
+        }
+        set(value) {
+            prefs.edit().putFloat(KEY_DEBUG_SPEEDUP, value ?: SENTINEL).apply()
+        }
+
     companion object {
         const val DEFAULT_EDGE = "http://10.0.2.2:8001"
         const val DEFAULT_CLOUD = "http://10.0.2.2:8002"
@@ -60,6 +74,7 @@ class EndpointsRepository(context: Context) {
         private const val KEY_CLOUD = "cloud_url"
         private const val KEY_MODE = "execution_mode"
         private const val KEY_DEBUG_NETWORK = "debug_network_score"
+        private const val KEY_DEBUG_SPEEDUP = "debug_speedup"
         private const val SENTINEL = -1f
     }
 }

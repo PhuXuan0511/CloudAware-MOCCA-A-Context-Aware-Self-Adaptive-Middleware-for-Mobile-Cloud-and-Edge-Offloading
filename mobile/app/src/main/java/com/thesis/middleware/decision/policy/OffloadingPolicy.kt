@@ -50,8 +50,12 @@ class OffloadingPolicy(
     }
 
     fun evaluate(analysis: TaskAnalysis): OffloadingPlan {
-        val speedup = analysis.localExecTimeMs /
-            analysis.remoteExecTimeMs.coerceAtLeast(MIN_EXEC_TIME_MS)
+        // Use end-to-end latency (RTT + transmission + compute) for the speedup
+        // so the guardrail reflects the user-perceived benefit, not raw CPU speedup.
+        // localExecTimeMs/remoteExecTimeMs exclude network and would produce the
+        // same ratio for every task on every network type — a fixed 1.11× for LIGHT.
+        val speedup = analysis.localLatencyMs /
+            analysis.remoteLatencyMs.coerceAtLeast(MIN_EXEC_TIME_MS)
         val signals = buildSignalSnapshot(analysis, speedup)
 
         return applyOffline(analysis, signals)

@@ -41,10 +41,19 @@ class ContextManager(
         mobilityCollector.stop()
     }
 
+    /**
+     * Debug-only override for demo scenarios where triggering a specific rule
+     * (e.g. UNSTABLE_NETWORK) requires a controlled network score that is
+     * otherwise impossible to reach on Wi-Fi (min Wi-Fi score ≈ 0.38).
+     * Set to null to restore real sensor readings.
+     */
+    var debugNetworkScore: Float? = null
+
     fun getLatestFeatures(): ContextFeatures {
         val snapshot = collectSnapshot()
         historyStore.save(snapshot)
-        return featureExtractor.extract(snapshot)
+        val features = featureExtractor.extract(snapshot)
+        return debugNetworkScore?.let { features.copy(networkScore = it) } ?: features
     }
 
     fun history(): ContextHistoryStore = historyStore

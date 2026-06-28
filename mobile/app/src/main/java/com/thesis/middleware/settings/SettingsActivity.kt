@@ -35,6 +35,7 @@ class SettingsActivity : Activity() {
     private lateinit var edgeField: EditText
     private lateinit var cloudField: EditText
     private lateinit var modeGroup: RadioGroup
+    private lateinit var debugNetworkField: EditText
     private var adaptiveId: Int = 0
     private var localOnlyId: Int = 0
     private var cloudOnlyId: Int = 0
@@ -48,6 +49,7 @@ class SettingsActivity : Activity() {
         edgeField.setText(app.endpointsRepository.edgeUrl)
         cloudField.setText(app.endpointsRepository.cloudUrl)
         modeGroup.check(modeRadioId(app.endpointsRepository.executionMode))
+        app.endpointsRepository.debugNetworkScore?.let { debugNetworkField.setText("%.2f".format(it)) }
     }
 
     private fun onSave() {
@@ -62,6 +64,11 @@ class SettingsActivity : Activity() {
         app.endpointsRepository.edgeUrl = edge
         app.endpointsRepository.cloudUrl = cloud
         app.endpointsRepository.executionMode = selectedMode()
+
+        val debugScore = debugNetworkField.text.toString().trim().toFloatOrNull()
+            ?.coerceIn(0f, 1f)
+        app.endpointsRepository.debugNetworkScore = debugScore
+        app.contextManager.debugNetworkScore = debugScore
 
         // Live-mutate the running ConnectionManager so future probes / requests
         // use the new endpoints without waiting for a process restart.
@@ -108,6 +115,13 @@ class SettingsActivity : Activity() {
         edgeField = urlField()
         cloudField = urlField()
 
+        debugNetworkField = EditText(this).apply {
+            inputType = InputType.TYPE_CLASS_NUMBER or InputType.TYPE_NUMBER_FLAG_DECIMAL
+            setSingleLine(true)
+            textSize = 14f
+            hint = getString(R.string.settings_debug_network_hint)
+        }
+
         // Execution mode radio group — Adaptive / Local-only / Cloud-only
         adaptiveId = View.generateViewId()
         localOnlyId = View.generateViewId()
@@ -150,6 +164,8 @@ class SettingsActivity : Activity() {
             addView(cloudField)
             addView(label(R.string.settings_mode_label))
             addView(modeGroup)
+            addView(label(R.string.settings_debug_network_label))
+            addView(debugNetworkField)
             addView(saveButton)
         }
     }

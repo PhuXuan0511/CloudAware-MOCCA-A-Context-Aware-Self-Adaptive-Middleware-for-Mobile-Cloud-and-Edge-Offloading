@@ -36,6 +36,21 @@ class EndpointsRepository(context: Context) {
         }.getOrDefault(ExecutionMode.ADAPTIVE)
         set(value) { prefs.edit().putString(KEY_MODE, value.name).apply() }
 
+    /**
+     * Debug-only: when non-null, ContextManager replaces the computed network
+     * score with this value before the policy sees it. Set to null to restore
+     * real sensor readings. -1f is the sentinel stored in SharedPreferences
+     * meaning "no override".
+     */
+    var debugNetworkScore: Float?
+        get() {
+            val stored = prefs.getFloat(KEY_DEBUG_NETWORK, SENTINEL)
+            return if (stored < 0f) null else stored
+        }
+        set(value) {
+            prefs.edit().putFloat(KEY_DEBUG_NETWORK, value ?: SENTINEL).apply()
+        }
+
     companion object {
         const val DEFAULT_EDGE = "http://10.0.2.2:8001"
         const val DEFAULT_CLOUD = "http://10.0.2.2:8002"
@@ -44,5 +59,7 @@ class EndpointsRepository(context: Context) {
         private const val KEY_EDGE = "edge_url"
         private const val KEY_CLOUD = "cloud_url"
         private const val KEY_MODE = "execution_mode"
+        private const val KEY_DEBUG_NETWORK = "debug_network_score"
+        private const val SENTINEL = -1f
     }
 }

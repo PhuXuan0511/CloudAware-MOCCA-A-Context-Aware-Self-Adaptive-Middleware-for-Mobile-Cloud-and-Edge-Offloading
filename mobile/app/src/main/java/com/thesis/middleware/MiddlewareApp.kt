@@ -36,7 +36,10 @@ class MiddlewareApp : Application() {
 
     // ── Context layer ─────────────────────────────────────────────────────
     val contextManager: ContextManager by lazy {
-        ContextManager(context = this, scope = appScope)
+        ContextManager(context = this, scope = appScope).also { cm ->
+            // Restore any persisted debug override so it survives process restarts.
+            cm.debugNetworkScore = endpointsRepository.debugNetworkScore
+        }
     }
 
     // ── Decision layer ────────────────────────────────────────────────────

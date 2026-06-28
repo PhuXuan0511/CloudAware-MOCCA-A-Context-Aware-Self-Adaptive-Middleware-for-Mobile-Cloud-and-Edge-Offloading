@@ -106,7 +106,7 @@ class MapeLoop(
 
     /**
      * Debug-only: when non-null, forces a specific compute speedup value
-     * (localExecTime / remoteExecTime) so any policy rule that checks the
+     * (localLatency / remoteLatency) so any policy rule that checks the
      * speedup threshold can be demonstrated without specific network conditions.
      * Set to null to restore real estimator values.
      */
@@ -116,7 +116,9 @@ class MapeLoop(
         val features = contextManager.getLatestFeatures()      // M
         val rawAnalysis = analyze(task, features)               // A
         val analysis = debugSpeedup?.let { s ->
-            rawAnalysis.copy(remoteExecTimeMs = rawAnalysis.localExecTimeMs / s.coerceAtLeast(0.01f))
+            // Override remoteLatencyMs so the policy's speedup formula
+            // (localLatencyMs / remoteLatencyMs) reflects the debug value.
+            rawAnalysis.copy(remoteLatencyMs = rawAnalysis.localLatencyMs / s.coerceAtLeast(0.01f))
         } ?: rawAnalysis
         val plan = plan(analysis)                               // P
         return execute(plan)                                    // E

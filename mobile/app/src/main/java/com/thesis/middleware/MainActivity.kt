@@ -403,26 +403,26 @@ class MainActivity : Activity() {
         return when {
             s.networkType == "NONE" -> "[OFFLINE → Rule 1 fires]"
             s.networkScore < 0.30f ->
-                "[< 0.30 unstable → Rule 3 may fire]"
+                "[< 0.30 unstable → Rule 2 may fire]"
             s.networkScore < 0.60f ->
                 "[≥ 0.30 stable, < 0.60 not good-bandwidth]"
             else ->
-                "[≥ 0.60 good bandwidth → Rule 7 may fire for HEAVY tasks]"
+                "[≥ 0.60 good bandwidth → Rule 6 may fire for HEAVY tasks]"
         }
     }
 
     private fun complexityThresholdNote(s: SignalSnapshot): String {
         return when (s.taskComplexity) {
-            "LIGHT" -> "[LIGHT → may trigger Rule 5 (latency-sensitive → edge)]"
-            "MEDIUM" -> "[MEDIUM → no complexity-specific rule, falls to Rule 8]"
-            "HEAVY" -> "[HEAVY → may trigger Rule 7 (heavy compute → edge/cloud)]"
+            "LIGHT" -> "[LIGHT → may trigger Rule 4 (latency-sensitive → edge)]"
+            "MEDIUM" -> "[MEDIUM → no complexity-specific rule, falls to Rule 7]"
+            "HEAVY" -> "[HEAVY → may trigger Rule 6 (heavy compute → edge/cloud)]"
             else -> "[unknown complexity]"
         }
     }
 
     private fun speedupThresholdNote(s: SignalSnapshot): String {
         return if (s.computeSpeedup < 1.50f) {
-            "[< 1.50× → Rule 4 (negligible speedup) may fire]"
+            "[< 1.50× → Rule 3 (COMPUTE_FLOOR_NOT_MET) may fire]"
         } else {
             "[≥ 1.50× compute floor met → offloading is worthwhile]"
         }
@@ -439,6 +439,11 @@ class MainActivity : Activity() {
      * were checked, which conditions held, and which rule won.
      */
     private fun renderRuleChain(s: SignalSnapshot, firedRule: String): String {
+        if (firedRule == "FORCED_LOCAL" || firedRule == "FORCED_CLOUD") {
+            val mode = if (firedRule == "FORCED_LOCAL") "LOCAL_ONLY" else "CLOUD_ONLY"
+            return "   Rule chain trace:\n     [Execution mode = $mode — all rules bypassed]\n\n"
+        }
+
         data class RuleCheck(val id: String, val displayName: String, val explanation: String)
 
         // Derived booleans matching the actual policy logic.

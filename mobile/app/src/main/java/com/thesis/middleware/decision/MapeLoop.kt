@@ -112,16 +112,31 @@ class MapeLoop(
      */
     var debugSpeedup: Float? = null
 
+    /**
+     * Debug-only: when non-null, replaces the estimated remote energy (mJ) so
+     * BALANCED_COST can be shown choosing LOCAL (high radio energy scenario,
+     * e.g. congested cell or deep-indoor poor coverage). Set to null to restore
+     * real estimator values.
+     */
+    var debugRemoteEnergyMj: Float? = null
+
     private fun runMape(task: OffloadableTask): OffloadingDecision {
         val features = contextManager.getLatestFeatures()      // M
         val rawAnalysis = analyze(task, features)               // A
-        val analysis = debugSpeedup?.let { s ->
-            // Override remoteLatencyMs so the policy's speedup formula
-            // (localLatencyMs / remoteLatencyMs) reflects the debug value.
-            rawAnalysis.copy(remoteLatencyMs = rawAnalysis.localLatencyMs / s.coerceAtLeast(0.01f))
-        } ?: rawAnalysis
+        val analysis = applyDebugOverrides(rawAnalysis)         // debug shims
         val plan = plan(analysis)                               // P
         return execute(plan)                                    // E
+    }
+
+    private fun applyDebugOverrides(a: TaskAnalysis): TaskAnalysis {
+        var r = a
+        debugSpeedup?.let { s ->
+            r = r.copy(remoteLatencyMs = r.localLatencyMs / s.coerceAtLeast(0.01f))
+        }
+        debugRemoteEnergyMj?.let { e ->
+            r = r.copy(remoteEnergyMj = e.coerceAtLeast(0f))
+        }
+        return r
     }
 
     private fun analyze(task: OffloadableTask, features: ContextFeatures): TaskAnalysis {

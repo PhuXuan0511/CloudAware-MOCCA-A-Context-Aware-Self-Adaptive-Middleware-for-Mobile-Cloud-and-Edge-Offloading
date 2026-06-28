@@ -65,6 +65,19 @@ class EndpointsRepository(context: Context) {
             prefs.edit().putFloat(KEY_DEBUG_SPEEDUP, value ?: SENTINEL).apply()
         }
 
+    /**
+     * Debug-only: when non-null, MapeLoop replaces the estimated remote energy
+     * so BALANCED_COST can be shown choosing LOCAL. -1f = no override.
+     */
+    var debugRemoteEnergyMj: Float?
+        get() {
+            val stored = prefs.getFloat(KEY_DEBUG_REMOTE_ENERGY, SENTINEL)
+            return if (stored < 0f) null else stored
+        }
+        set(value) {
+            prefs.edit().putFloat(KEY_DEBUG_REMOTE_ENERGY, value ?: SENTINEL).apply()
+        }
+
     companion object {
         const val DEFAULT_EDGE = "http://10.0.2.2:8001"
         const val DEFAULT_CLOUD = "http://10.0.2.2:8002"
@@ -75,6 +88,7 @@ class EndpointsRepository(context: Context) {
         private const val KEY_MODE = "execution_mode"
         private const val KEY_DEBUG_NETWORK = "debug_network_score"
         private const val KEY_DEBUG_SPEEDUP = "debug_speedup"
+        private const val KEY_DEBUG_REMOTE_ENERGY = "debug_remote_energy"
         private const val SENTINEL = -1f
     }
 }

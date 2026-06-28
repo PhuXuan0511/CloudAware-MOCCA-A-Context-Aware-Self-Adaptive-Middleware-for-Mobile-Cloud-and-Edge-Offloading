@@ -48,6 +48,7 @@ class MiddlewareApp : Application() {
     val mapeLoop: MapeLoop by lazy {
         MapeLoop(contextManager = contextManager, scope = appScope, policy = policy).also { ml ->
             ml.debugSpeedup = endpointsRepository.debugSpeedup
+            ml.debugRemoteEnergyMj = endpointsRepository.debugRemoteEnergyMj
         }
     }
 

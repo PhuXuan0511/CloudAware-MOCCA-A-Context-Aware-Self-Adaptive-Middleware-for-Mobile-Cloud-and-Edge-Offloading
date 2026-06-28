@@ -37,6 +37,7 @@ class SettingsActivity : Activity() {
     private lateinit var modeGroup: RadioGroup
     private lateinit var debugNetworkField: EditText
     private lateinit var debugSpeedupField: EditText
+    private lateinit var debugRemoteEnergyField: EditText
     private var adaptiveId: Int = 0
     private var localOnlyId: Int = 0
     private var cloudOnlyId: Int = 0
@@ -52,6 +53,7 @@ class SettingsActivity : Activity() {
         modeGroup.check(modeRadioId(app.endpointsRepository.executionMode))
         app.endpointsRepository.debugNetworkScore?.let { debugNetworkField.setText("%.2f".format(it)) }
         app.endpointsRepository.debugSpeedup?.let { debugSpeedupField.setText("%.2f".format(it)) }
+        app.endpointsRepository.debugRemoteEnergyMj?.let { debugRemoteEnergyField.setText("%.0f".format(it)) }
     }
 
     private fun onSave() {
@@ -76,6 +78,11 @@ class SettingsActivity : Activity() {
             ?.coerceAtLeast(0.01f)
         app.endpointsRepository.debugSpeedup = debugSpeedup
         app.mapeLoop.debugSpeedup = debugSpeedup
+
+        val debugRemoteEnergy = debugRemoteEnergyField.text.toString().trim().toFloatOrNull()
+            ?.coerceAtLeast(0f)
+        app.endpointsRepository.debugRemoteEnergyMj = debugRemoteEnergy
+        app.mapeLoop.debugRemoteEnergyMj = debugRemoteEnergy
 
         // Live-mutate the running ConnectionManager so future probes / requests
         // use the new endpoints without waiting for a process restart.
@@ -134,6 +141,12 @@ class SettingsActivity : Activity() {
             textSize = 14f
             hint = getString(R.string.settings_debug_speedup_hint)
         }
+        debugRemoteEnergyField = EditText(this).apply {
+            inputType = InputType.TYPE_CLASS_NUMBER or InputType.TYPE_NUMBER_FLAG_DECIMAL
+            setSingleLine(true)
+            textSize = 14f
+            hint = getString(R.string.settings_debug_remote_energy_hint)
+        }
 
         // Execution mode radio group — Adaptive / Local-only / Cloud-only
         adaptiveId = View.generateViewId()
@@ -181,6 +194,8 @@ class SettingsActivity : Activity() {
             addView(debugNetworkField)
             addView(label(R.string.settings_debug_speedup_label))
             addView(debugSpeedupField)
+            addView(label(R.string.settings_debug_remote_energy_label))
+            addView(debugRemoteEnergyField)
             addView(saveButton)
         }
     }

@@ -1,17 +1,22 @@
 package com.thesis.middleware.context.collectors
 
+import android.os.Process
+import android.os.SystemClock
 import com.thesis.middleware.context.CpuContext
 import java.io.File
-import java.io.RandomAccessFile
 
 /**
- * Reads aggregate CPU usage from /proc/stat by diffing idle vs. total ticks
- * between successive calls. Frequency comes from cpufreq sysfs when readable.
+ * Measures CPU usage by diffing Process.getElapsedCpuTime() against wall-clock
+ * time between successive calls.
+ *
+ * /proc/stat is blocked by SELinux on Android 8+ for third-party apps, so we
+ * measure this process's own CPU consumption instead. The result is the fraction
+ * of one CPU core used by the middleware process, capped at 100%.
  */
 class CpuCollector {
 
-    private var lastIdle = 0L
-    private var lastTotal = 0L
+    private var lastCpuMs = 0L
+    private var lastRealMs = 0L
 
     fun collect(): CpuContext = CpuContext(
         usagePercent = readUsagePercent(),
@@ -19,20 +24,15 @@ class CpuCollector {
         frequencyMhz = readFrequencyMhz()
     )
 
-    private fun readUsagePercent(): Float = try {
-        RandomAccessFile("/proc/stat", "r").use { f ->
-            val parts = f.readLine().split(Regex("\\s+"))
-            val nums = parts.drop(1).take(8).map { it.toLong() }
-            val idle = nums[3] + nums[4] // idle + iowait
-            val total = nums.sum()
-            val diffIdle = idle - lastIdle
-            val diffTotal = total - lastTotal
-            lastIdle = idle
-            lastTotal = total
-            if (diffTotal <= 0) 0f else (1f - diffIdle.toFloat() / diffTotal) * 100f
-        }
-    } catch (_: Exception) {
-        0f
+    private fun readUsagePercent(): Float {
+        val cpuMs  = Process.getElapsedCpuTime()
+        val realMs = SystemClock.elapsedRealtime()
+        val diffCpu  = cpuMs  - lastCpuMs
+        val diffReal = realMs - lastRealMs
+        lastCpuMs  = cpuMs
+        lastRealMs = realMs
+        return if (diffReal <= 0L) 0f
+        else (diffCpu.toFloat() / diffReal.toFloat() * 100f).coerceIn(0f, 100f)
     }
 
     private fun readFrequencyMhz(): Int = try {

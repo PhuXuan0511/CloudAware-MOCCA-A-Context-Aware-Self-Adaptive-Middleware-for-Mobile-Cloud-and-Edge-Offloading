@@ -459,7 +459,7 @@ class MainActivity : Activity() {
             RuleCheck("UNSTABLE_NETWORK", "UNSTABLE_NETWORK",
                 if (unstable) "score ${"%.2f".format(s.networkScore)} < 0.30"
                 else "score ${"%.2f".format(s.networkScore)} ≥ 0.30"),
-            RuleCheck("NEGLIGIBLE_SPEEDUP", "NEGLIGIBLE_SPEEDUP / COMPUTE_FLOOR_NOT_MET",
+            RuleCheck("COMPUTE_FLOOR_NOT_MET", "COMPUTE_FLOOR_NOT_MET",
                 if (belowFloor) "speedup ${"%.2f".format(s.computeSpeedup)}× < 1.50×"
                 else "speedup ${"%.2f".format(s.computeSpeedup)}× ≥ 1.50×"),
             RuleCheck("LATENCY_SENSITIVE", "LATENCY_SENSITIVE",

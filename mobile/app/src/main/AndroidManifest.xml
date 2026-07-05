@@ -43,5 +43,15 @@
             android:foregroundServiceType="location"
             android:exported="false" />
 
+        <!-- ADB-triggered receiver for automated Phase 1 data collection -->
+        <receiver android:name=".AutoRunReceiver" android:exported="true">
+            <intent-filter>
+                <action android:name="com.thesis.middleware.RUN_TASK" />
+                <action android:name="com.thesis.middleware.SET_MODE" />
+                <action android:name="com.thesis.middleware.SET_DEBUG" />
+                <action android:name="com.thesis.middleware.CLEAR_DEBUG" />
+            </intent-filter>
+        </receiver>
+
     </application>
 </manifest>

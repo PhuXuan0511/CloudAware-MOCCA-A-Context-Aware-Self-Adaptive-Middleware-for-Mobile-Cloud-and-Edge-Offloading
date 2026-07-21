@@ -6,6 +6,7 @@ import com.thesis.middleware.context.ContextManager
 import com.thesis.middleware.context.FeatureExtractor
 import com.thesis.middleware.decision.estimators.*
 import com.thesis.middleware.decision.policy.OffloadingPolicy
+import com.thesis.middleware.decision.policy.RandomForestPolicy
 import kotlinx.coroutines.*
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -45,6 +46,9 @@ class MapeLoop(
     private val taskChannel = Channel<Submission>(Channel.UNLIMITED)
     private val _contextDrift = MutableSharedFlow<ContextDriftEvent>(extraBufferCapacity = 16)
     val contextDrift: SharedFlow<ContextDriftEvent> = _contextDrift.asSharedFlow()
+
+    /** Swapped in by [MiddlewareApp] after the RF model is loaded. */
+    var rfPolicy: RandomForestPolicy? = null
 
     private var consumerJob: Job? = null
     private var driftJob: Job? = null
@@ -126,6 +130,20 @@ class MapeLoop(
         val analysis = applyDebugOverrides(rawAnalysis)         // debug shims
         val plan = plan(analysis)                               // P
         return execute(plan)                                    // E
+    }
+
+    /**
+     * MAPE loop variant for [ExecutionMode.ADAPTIVE_ML]: runs the full
+     * Monitor+Analyze pipeline but replaces the rule-based Plan step with
+     * [RandomForestPolicy] inference. Falls back to the rule-based policy
+     * if the RF model has not been loaded yet.
+     */
+    fun runMapeWithMl(task: OffloadableTask): OffloadingDecision {
+        val features = contextManager.getLatestFeatures()
+        val rawAnalysis = analyze(task, features)
+        val analysis = applyDebugOverrides(rawAnalysis)
+        val plan = rfPolicy?.evaluate(analysis) ?: policy.evaluate(analysis)
+        return execute(plan)
     }
 
     private fun applyDebugOverrides(a: TaskAnalysis): TaskAnalysis {

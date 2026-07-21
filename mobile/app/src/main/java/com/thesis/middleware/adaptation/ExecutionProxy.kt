@@ -57,14 +57,15 @@ class ExecutionProxy(
         // output (target/rule) is overridden below when mode != ADAPTIVE.
         val natural = mapeLoop.decide(task)
         val decision: OffloadingDecision = when (mode) {
-            ExecutionMode.ADAPTIVE -> natural
-            ExecutionMode.LOCAL_ONLY -> natural.copy(
+            ExecutionMode.ADAPTIVE    -> natural
+            ExecutionMode.ADAPTIVE_ML -> mapeLoop.runMapeWithMl(task)
+            ExecutionMode.LOCAL_ONLY  -> natural.copy(
                 shouldOffload = false,
                 target = ExecutionTarget.LOCAL,
                 rule = "FORCED_LOCAL",
                 reasoning = "execution mode = LOCAL_ONLY — MAPE bypassed for baseline comparison",
             )
-            ExecutionMode.CLOUD_ONLY -> natural.copy(
+            ExecutionMode.CLOUD_ONLY  -> natural.copy(
                 shouldOffload = true,
                 target = ExecutionTarget.CLOUD,
                 rule = "FORCED_CLOUD",

@@ -8,6 +8,7 @@ import com.thesis.middleware.communication.OffloadingClient
 import com.thesis.middleware.context.ContextManager
 import com.thesis.middleware.decision.MapeLoop
 import com.thesis.middleware.decision.policy.OffloadingPolicy
+import com.thesis.middleware.decision.policy.RandomForestPolicy
 import com.thesis.middleware.metrics.MetricsRecorder
 import com.thesis.middleware.settings.EndpointsRepository
 import kotlinx.coroutines.CoroutineScope
@@ -37,18 +38,22 @@ class MiddlewareApp : Application() {
     // ── Context layer ─────────────────────────────────────────────────────
     val contextManager: ContextManager by lazy {
         ContextManager(context = this, scope = appScope).also { cm ->
-            // Restore any persisted debug override so it survives process restarts.
+            // Restore any persisted debug overrides so they survive process restarts.
             cm.debugNetworkScore = endpointsRepository.debugNetworkScore
+            cm.debugBatteryPercent = endpointsRepository.debugBatteryPercent
         }
     }
 
     // ── Decision layer ────────────────────────────────────────────────────
     private val policy: OffloadingPolicy by lazy { OffloadingPolicy() }
 
+    private val rfPolicy: RandomForestPolicy by lazy { RandomForestPolicy(this) }
+
     val mapeLoop: MapeLoop by lazy {
         MapeLoop(contextManager = contextManager, scope = appScope, policy = policy).also { ml ->
             ml.debugSpeedup = endpointsRepository.debugSpeedup
             ml.debugRemoteEnergyMj = endpointsRepository.debugRemoteEnergyMj
+            ml.rfPolicy = rfPolicy
         }
     }
 

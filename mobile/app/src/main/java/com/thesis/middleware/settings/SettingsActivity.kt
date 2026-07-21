@@ -38,7 +38,9 @@ class SettingsActivity : Activity() {
     private lateinit var debugNetworkField: EditText
     private lateinit var debugSpeedupField: EditText
     private lateinit var debugRemoteEnergyField: EditText
+    private lateinit var debugBatteryField: EditText
     private var adaptiveId: Int = 0
+    private var adaptiveMlId: Int = 0
     private var localOnlyId: Int = 0
     private var cloudOnlyId: Int = 0
 
@@ -54,6 +56,7 @@ class SettingsActivity : Activity() {
         app.endpointsRepository.debugNetworkScore?.let { debugNetworkField.setText("%.2f".format(it)) }
         app.endpointsRepository.debugSpeedup?.let { debugSpeedupField.setText("%.2f".format(it)) }
         app.endpointsRepository.debugRemoteEnergyMj?.let { debugRemoteEnergyField.setText("%.0f".format(it)) }
+        app.endpointsRepository.debugBatteryPercent?.let { debugBatteryField.setText(it.toString()) }
     }
 
     private fun onSave() {
@@ -84,6 +87,11 @@ class SettingsActivity : Activity() {
         app.endpointsRepository.debugRemoteEnergyMj = debugRemoteEnergy
         app.mapeLoop.debugRemoteEnergyMj = debugRemoteEnergy
 
+        val debugBattery = debugBatteryField.text.toString().trim().toIntOrNull()
+            ?.coerceIn(0, 100)
+        app.endpointsRepository.debugBatteryPercent = debugBattery
+        app.contextManager.debugBatteryPercent = debugBattery
+
         // Live-mutate the running ConnectionManager so future probes / requests
         // use the new endpoints without waiting for a process restart.
         app.connectionManager.edgeEndpoint = app.endpointsRepository.edgeUrl
@@ -99,15 +107,17 @@ class SettingsActivity : Activity() {
     }
 
     private fun modeRadioId(mode: ExecutionMode): Int = when (mode) {
-        ExecutionMode.ADAPTIVE   -> adaptiveId
-        ExecutionMode.LOCAL_ONLY -> localOnlyId
-        ExecutionMode.CLOUD_ONLY -> cloudOnlyId
+        ExecutionMode.ADAPTIVE    -> adaptiveId
+        ExecutionMode.ADAPTIVE_ML -> adaptiveMlId
+        ExecutionMode.LOCAL_ONLY  -> localOnlyId
+        ExecutionMode.CLOUD_ONLY  -> cloudOnlyId
     }
 
     private fun selectedMode(): ExecutionMode = when (modeGroup.checkedRadioButtonId) {
-        localOnlyId -> ExecutionMode.LOCAL_ONLY
-        cloudOnlyId -> ExecutionMode.CLOUD_ONLY
-        else        -> ExecutionMode.ADAPTIVE
+        adaptiveMlId -> ExecutionMode.ADAPTIVE_ML
+        localOnlyId  -> ExecutionMode.LOCAL_ONLY
+        cloudOnlyId  -> ExecutionMode.CLOUD_ONLY
+        else         -> ExecutionMode.ADAPTIVE
     }
 
     private fun isValidUrl(s: String): Boolean =
@@ -147,9 +157,16 @@ class SettingsActivity : Activity() {
             textSize = 14f
             hint = getString(R.string.settings_debug_remote_energy_hint)
         }
+        debugBatteryField = EditText(this).apply {
+            inputType = InputType.TYPE_CLASS_NUMBER
+            setSingleLine(true)
+            textSize = 14f
+            hint = "e.g. 25  (blank = real battery)"
+        }
 
         // Execution mode radio group — Adaptive / Local-only / Cloud-only
         adaptiveId = View.generateViewId()
+        adaptiveMlId = View.generateViewId()
         localOnlyId = View.generateViewId()
         cloudOnlyId = View.generateViewId()
         modeGroup = RadioGroup(this).apply {
@@ -157,6 +174,11 @@ class SettingsActivity : Activity() {
             addView(RadioButton(this@SettingsActivity).apply {
                 id = adaptiveId
                 text = ExecutionMode.ADAPTIVE.displayName
+                textSize = 13f
+            })
+            addView(RadioButton(this@SettingsActivity).apply {
+                id = adaptiveMlId
+                text = ExecutionMode.ADAPTIVE_ML.displayName
                 textSize = 13f
             })
             addView(RadioButton(this@SettingsActivity).apply {
@@ -196,6 +218,8 @@ class SettingsActivity : Activity() {
             addView(debugSpeedupField)
             addView(label(R.string.settings_debug_remote_energy_label))
             addView(debugRemoteEnergyField)
+            addView(label(R.string.settings_debug_battery_label))
+            addView(debugBatteryField)
             addView(saveButton)
         }
     }

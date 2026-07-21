@@ -14,6 +14,9 @@ package com.thesis.middleware.adaptation
  *
  * Modes:
  *  - [ADAPTIVE]    — default; full MAPE loop with the 7 named rules.
+ *  - [ADAPTIVE_ML] — Random Forest policy; same MAPE Analyze step, but the
+ *                    Plan step is replaced by on-device RF inference loaded
+ *                    from assets/rf-model.json.
  *  - [LOCAL_ONLY]  — baseline; always executes on the phone, MAPE bypassed.
  *  - [CLOUD_ONLY]  — baseline; always offloads to cloud, NO fallback so
  *                    network failures surface as errors (intentional — shows
@@ -22,6 +25,7 @@ package com.thesis.middleware.adaptation
  */
 enum class ExecutionMode(val displayName: String) {
     ADAPTIVE("Adaptive (MAPE rule-based)"),
+    ADAPTIVE_ML("Adaptive ML (Random Forest)"),
     LOCAL_ONLY("Local-only (force phone CPU)"),
     CLOUD_ONLY("Cloud-only (force remote, no fallback)"),
 }

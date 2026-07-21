@@ -78,6 +78,20 @@ class EndpointsRepository(context: Context) {
             prefs.edit().putFloat(KEY_DEBUG_REMOTE_ENERGY, value ?: SENTINEL).apply()
         }
 
+    /**
+     * Debug-only: when non-null, ContextManager replaces the real battery level
+     * and forces isCharging=false so LOW_BATTERY_OFFLOAD fires from the Settings
+     * screen without physically draining the battery. -1 = no override.
+     */
+    var debugBatteryPercent: Int?
+        get() {
+            val stored = prefs.getInt(KEY_DEBUG_BATTERY, -1)
+            return if (stored < 0) null else stored
+        }
+        set(value) {
+            prefs.edit().putInt(KEY_DEBUG_BATTERY, value ?: -1).apply()
+        }
+
     companion object {
         const val DEFAULT_EDGE = "http://10.0.2.2:8001"
         const val DEFAULT_CLOUD = "http://10.0.2.2:8002"
@@ -89,6 +103,7 @@ class EndpointsRepository(context: Context) {
         private const val KEY_DEBUG_NETWORK = "debug_network_score"
         private const val KEY_DEBUG_SPEEDUP = "debug_speedup"
         private const val KEY_DEBUG_REMOTE_ENERGY = "debug_remote_energy"
+        private const val KEY_DEBUG_BATTERY = "debug_battery_percent"
         private const val SENTINEL = -1f
     }
 }

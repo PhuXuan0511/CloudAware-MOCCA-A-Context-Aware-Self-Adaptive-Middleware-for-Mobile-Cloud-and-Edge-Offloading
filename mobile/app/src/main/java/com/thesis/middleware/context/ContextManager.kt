@@ -49,8 +49,19 @@ class ContextManager(
      */
     var debugNetworkScore: Float? = null
 
+    /**
+     * Debug-only override: when non-null, replaces the real battery level
+     * AND forces isCharging=false so LOW_BATTERY_OFFLOAD can be demonstrated
+     * from the Settings screen without draining the physical battery below 30%.
+     * Set to null to restore real sensor readings.
+     */
+    var debugBatteryPercent: Int? = null
+
     fun getLatestFeatures(): ContextFeatures {
-        val snapshot = collectSnapshot()
+        val rawSnapshot = collectSnapshot()
+        val snapshot = debugBatteryPercent?.let { pct ->
+            rawSnapshot.copy(battery = rawSnapshot.battery.copy(levelPercent = pct, isCharging = false))
+        } ?: rawSnapshot
         historyStore.save(snapshot)
         val features = featureExtractor.extract(snapshot)
         return debugNetworkScore?.let { features.copy(networkScore = it) } ?: features

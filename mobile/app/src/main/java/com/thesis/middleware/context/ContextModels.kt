@@ -27,9 +27,38 @@ data class CpuContext(
 data class BatteryContext(
     val levelPercent: Int,
     val isCharging: Boolean,
-    val temperatureCelsius: Float
+    val temperatureCelsius: Float,
+    /**
+     * Instantaneous battery current in microamperes, from
+     * `BATTERY_PROPERTY_CURRENT_NOW`. Negative while discharging on most
+     * devices, though the sign convention is not guaranteed by the platform —
+     * [powerMilliWatts] takes the magnitude.
+     *
+     * `null` when the device does not implement the property.
+     */
+    val currentNowMicroAmps: Int? = null,
+    /** Battery voltage in millivolts, from `EXTRA_VOLTAGE`. `null` if absent. */
+    val voltageMilliVolts: Int? = null,
 ) {
     val isLowPower: Boolean get() = levelPercent < 20 && !isCharging
+
+    /**
+     * Whole-device power draw in milliwatts (`P = V × I`), or `null` when the
+     * device exposes neither current nor voltage.
+     *
+     * This is the **total** device draw — screen, radio, and background work
+     * included — not the power attributable to one task. Attribution requires
+     * differencing against an idle baseline; see `EnergyEstimator` for the
+     * modelled per-task figure this is used to validate.
+     */
+    val powerMilliWatts: Float?
+        get() {
+            val uA = currentNowMicroAmps ?: return null
+            val mV = voltageMilliVolts ?: return null
+            if (mV <= 0) return null
+            // |µA| / 1000 = mA;  mA × mV / 1000 = mW
+            return (kotlin.math.abs(uA) / 1000f) * (mV / 1000f)
+        }
 }
 
 data class LocationContext(

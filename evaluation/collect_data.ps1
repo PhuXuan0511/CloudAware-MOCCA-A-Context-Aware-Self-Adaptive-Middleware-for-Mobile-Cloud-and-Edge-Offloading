@@ -16,10 +16,27 @@
 #   FIX-G: Task balance improved - video + sha256 counts raised across all
 #           sessions to fix matrix-multiply domination (66% -> ~25%)
 #   FIX-H: Session H pause message updated for hotspot approach (no ngrok)
+#   FIX-I: Cloud gets a persistent WAN-distance delay. Both containers run on
+#           this laptop, so without it "cloud" is a second process one hop away
+#           and measures *closer* than the edge whenever the edge is shaped -
+#           which inverts the premise the thesis argues.
+#   FIX-J: Network degradation is applied to BOTH tiers. Shaping only the edge
+#           emulates "the edge got worse", not "the phone's access link got
+#           worse", and would push every decision to the cloud for the wrong
+#           reason.
 #
 # Usage:
 #   .\evaluation\collect_data.ps1
+#   .\evaluation\collect_data.ps1 -CloudRttMs 0     # co-located cloud (not advised)
 # =============================================================================
+
+param(
+    # Added one-way delay on the cloud container, in ms, held for the whole run.
+    # Stands in for wide-area distance to a datacentre: edge stays on the LAN,
+    # cloud sits ~80ms away. Report this number in the thesis - it is an
+    # emulated topology, not a measured one. Set to 0 to disable.
+    [int]$CloudRttMs = 80
+)
 
 $PKG            = "com.thesis.middleware"
 $ACTION_RUN     = "$PKG.RUN_TASK"
@@ -29,7 +46,11 @@ $ACTION_CLR     = "$PKG.CLEAR_DEBUG"
 
 $TASK_DELAY_MS  = 3000
 $VIDEO_DELAY_MS = 6000
-$EDGE_CONTAINER = "docker-edge-server-1"
+# Discovered in pre-flight via the compose service label rather than hardcoded:
+# the generated name depends on the compose project and on the v1/v2 separator
+# ("docker_edge-server_1" vs "docker-edge-server-1").
+$EDGE_CONTAINER  = $null
+$CLOUD_CONTAINER = $null
 
 # =============================================================================
 # HELPERS
@@ -59,11 +80,27 @@ function Broadcast($action, $extras = "") {
     Invoke-Expression $full | Out-Null
 }
 
-function Run-Task($task, $count, $delayMs = $TASK_DELAY_MS) {
+function Run-Task($task, $count, $delayMs = $TASK_DELAY_MS, $size = 0) {
     $waitSec = [math]::Ceiling($count * $delayMs / 1000) + 6
-    Step "run $task x$count  (waiting ${waitSec}s)"
-    Broadcast $ACTION_RUN "--es task $task --ei count $count --el delay_ms $delayMs"
+    $sizeArg = ""
+    $label   = "$task x$count"
+    if ($size -gt 0) {
+        $sizeArg = "--ei size $size"
+        $label   = "$task x$count (size=$size)"
+    }
+    Step "run $label  (waiting ${waitSec}s)"
+    Broadcast $ACTION_RUN "--es task $task --ei count $count --el delay_ms $delayMs $sizeArg"
     Start-Sleep -Seconds $waitSec
+}
+
+# Forces the accelerometer-derived movement state. MobilityCollector only ever
+# reports STATIONARY for a phone on a desk, so without this the WALKING/VEHICLE
+# branches of pickRemoteTarget and the mobility latency penalty are dead code
+# as far as the collected data is concerned.
+function Set-Movement($state) {
+    Step "movement state -> $state"
+    Broadcast $ACTION_DBG "--es movement_state $state"
+    Start-Sleep -Seconds 2
 }
 
 function Set-ExecMode($mode) {
@@ -84,17 +121,103 @@ function Clear-AllDebug {
     Start-Sleep -Seconds 1
 }
 
-function Set-Netem($delay, $loss) {
-    Step "netem -> delay=${delay}ms loss=${loss}%"
-    $null = docker exec $EDGE_CONTAINER tc qdisc del dev eth0 root 2>&1
-    docker exec $EDGE_CONTAINER tc qdisc add dev eth0 root netem delay "${delay}ms" loss "${loss}%" | Out-Null
-    Start-Sleep -Seconds 8   # FIX-D: increased from 6s so NetworkCollector re-probes
+# Resolve a container by its compose service label, which is stable across
+# compose v1/v2 naming and any project name.
+function Resolve-Container($service, $fallbackPattern) {
+    $name = docker ps --filter "label=com.docker.compose.service=$service" `
+                      --format "{{.Names}}" | Select-Object -First 1
+    if (-not $name) {
+        # Fall back to a name match for containers started outside compose.
+        $name = docker ps --format "{{.Names}}" |
+                Where-Object { $_ -match $fallbackPattern } | Select-Object -First 1
+    }
+    return $name
 }
 
+function Resolve-EdgeContainer  { Resolve-Container "edge-server"  "edge" }
+function Resolve-CloudContainer { Resolve-Container "cloud-server" "cloud" }
+
+# Verify tc is usable BEFORE any session depends on it.
+#
+# Two separate failure modes, both previously silent because the tc output was
+# piped to Out-Null and the exit code never checked:
+#   1. `tc` is absent      - python:3.11-slim ships no iproute2
+#   2. "Operation not permitted" - the container lacks NET_ADMIN
+# Either one means Session C records normal-network rows while claiming to have
+# injected 500ms/20% loss, and UNSTABLE_NETWORK barely fires.
+function Assert-NetemUsable($container) {
+    Step "verifying tc/netem works inside $container"
+
+    $probe = docker exec $container tc qdisc show dev eth0 2>&1 | Out-String
+    if ($LASTEXITCODE -ne 0 -or $probe -match "not found|executable file") {
+        Warn "tc is not available in $container."
+        Warn "The image needs iproute2 - rebuild with:"
+        Warn "  docker compose -f docker/docker-compose.yml up -d --build"
+        return $false
+    }
+
+    $null = docker exec $container tc qdisc del dev eth0 root 2>&1
+    $add = docker exec $container tc qdisc add dev eth0 root netem delay 1ms 2>&1 | Out-String
+    if ($LASTEXITCODE -ne 0 -or $add -match "not permitted|Error") {
+        Warn "tc exists but cannot modify qdiscs: $($add.Trim())"
+        Warn "The container needs NET_ADMIN. docker-compose.yml grants it via cap_add;"
+        Warn "recreate the containers so the capability takes effect:"
+        Warn "  docker compose -f docker/docker-compose.yml up -d --force-recreate"
+        return $false
+    }
+
+    $null = docker exec $container tc qdisc del dev eth0 root 2>&1
+    Ok "tc/netem works in $container"
+    return $true
+}
+
+# Applies a qdisc to one container and confirms it took effect, rather than
+# trusting the exit code. `delay 0ms loss 0%` is still a netem qdisc, so the
+# verification below holds for the healthy-baseline case too.
+function Apply-Netem($container, $delay, $loss) {
+    $null = docker exec $container tc qdisc del dev eth0 root 2>&1
+    if ($delay -le 0 -and $loss -le 0) { return $true }
+
+    $out = docker exec $container tc qdisc add dev eth0 root netem `
+               delay "${delay}ms" loss "${loss}%" 2>&1 | Out-String
+    $shown = docker exec $container tc qdisc show dev eth0 2>&1 | Out-String
+    if ($shown -notmatch "netem") {
+        Warn "netem did NOT apply to ${container}: $($out.Trim())"
+        return $false
+    }
+    Write-Host ("    {0,-28} {1}" -f $container, $shown.Trim()) -ForegroundColor DarkGray
+    return $true
+}
+
+# Degrade the phone's ACCESS LINK, which means both tiers.
+#
+# Shaping only the edge would emulate "the edge node got slower" while the cloud
+# stayed pristine - so every degraded row would route to the cloud, and the data
+# would show the policy fleeing the edge under conditions that in reality affect
+# both paths equally. The cloud keeps its baseline WAN delay on top, since
+# distance does not disappear when the access link degrades.
+function Set-Netem($delay, $loss) {
+    Step "netem -> edge: delay=${delay}ms loss=${loss}%   cloud: delay=$($delay + $CloudRttMs)ms loss=${loss}%"
+    $edgeOk  = Apply-Netem $EDGE_CONTAINER  $delay $loss
+    $cloudOk = Apply-Netem $CLOUD_CONTAINER ($delay + $CloudRttMs) $loss
+
+    if (-not ($edgeOk -and $cloudOk)) {
+        Warn "These rows would be labelled as degraded but collected on a healthy link."
+        Pause-ForUser "Fix netem (see the pre-flight output above) then press Enter, or Ctrl+C to abort."
+    }
+    # The phone re-probes RTT on a 5s TTL, so it needs longer than that to see
+    # the new conditions. Rows collected before it does would carry the previous
+    # network score.
+    Start-Sleep -Seconds 10
+}
+
+# Returns to "healthy access link", NOT to "no shaping at all": the cloud keeps
+# its WAN-distance baseline for the whole run.
 function Clear-Netem {
-    Step "removing netem"
-    $null = docker exec $EDGE_CONTAINER tc qdisc del dev eth0 root 2>&1
-    Start-Sleep -Seconds 3
+    Step "restoring healthy link (cloud stays at ${CloudRttMs}ms WAN baseline)"
+    $null = Apply-Netem $EDGE_CONTAINER 0 0
+    $null = Apply-Netem $CLOUD_CONTAINER $CloudRttMs 0
+    Start-Sleep -Seconds 8
 }
 
 function Pause-ForUser($msg) {
@@ -144,12 +267,85 @@ Ok "Device: $device"
 
 $containers = docker ps --format "{{.Names}}" | Where-Object { $_ -match "edge|cloud" }
 if (-not $containers) {
-    Write-Error "Edge/cloud containers not running. Run 'docker compose up -d' first."
+    Write-Error "Edge/cloud containers not running. Run 'docker compose -f docker/docker-compose.yml up -d --build' first."
     exit 1
 }
 Ok "Containers: $($containers -join ', ')"
 
+$EDGE_CONTAINER = Resolve-EdgeContainer
+if (-not $EDGE_CONTAINER) {
+    Write-Error "Could not identify the edge container. Is docker compose up?"
+    exit 1
+}
+$CLOUD_CONTAINER = Resolve-CloudContainer
+if (-not $CLOUD_CONTAINER) {
+    Write-Error "Could not identify the cloud container. Is docker compose up?"
+    exit 1
+}
+Ok "Edge container : $EDGE_CONTAINER"
+Ok "Cloud container: $CLOUD_CONTAINER"
+
 Assert-ServersHealthy
+
+# Session C is worthless if netem cannot be applied, so check now rather than
+# discovering it 20 minutes in. Both tiers are checked because both are shaped.
+$netemOk = (Assert-NetemUsable $EDGE_CONTAINER) -and (Assert-NetemUsable $CLOUD_CONTAINER)
+if (-not $netemOk) {
+    Warn "Session C would collect normal-network rows labelled as degraded,"
+    Warn "and the cloud would measure as close as the edge."
+    Pause-ForUser "Rebuild/recreate the containers as described above, then press Enter to re-check."
+    $netemOk = (Assert-NetemUsable $EDGE_CONTAINER) -and (Assert-NetemUsable $CLOUD_CONTAINER)
+    if (-not $netemOk) {
+        Pause-ForUser "netem still unavailable. Press Enter to continue anyway (network conditions will NOT be shaped), or Ctrl+C to abort."
+    }
+}
+
+# ── Emulated topology ────────────────────────────────────────────────────────
+# Both servers are containers on this laptop, one hop from the phone. Left as-is,
+# "cloud" is not a distant tier - it is a second local process with a bigger CPU
+# quota, so cloud latency would come out at or below edge latency and the whole
+# edge-versus-cloud argument would invert. A persistent one-way delay on the
+# cloud container stands in for the distance to a datacentre.
+#
+# This is emulation and must be reported as such: the cloud tier's network cost
+# is a number chosen here, not one measured against a real provider.
+if ($netemOk -and $CloudRttMs -gt 0) {
+    Step "installing WAN baseline: cloud +${CloudRttMs}ms one-way, edge unshaped"
+    if (Apply-Netem $CLOUD_CONTAINER $CloudRttMs 0) {
+        Ok "Cloud is now ~${CloudRttMs}ms further away than the edge for the whole run"
+    } else {
+        Warn "Could not shape the cloud - edge and cloud will be indistinguishable"
+    }
+    Start-Sleep -Seconds 5
+} elseif ($CloudRttMs -le 0) {
+    Warn "-CloudRttMs 0: edge and cloud are co-located and will measure the same."
+    Warn "Any edge-vs-cloud latency difference in the results is CPU quota, not distance."
+}
+
+# The edge forwards to the cloud when it considers itself overloaded. Since the
+# monitor became cgroup-aware this reflects the container's own budget, but a
+# genuinely loaded edge still forwards - and that would silently turn every EDGE
+# decision into a cloud run. Check before committing to a 45-minute session.
+Step "checking edge is not already overloaded"
+try {
+    $edgeStatus = Invoke-RestMethod "http://localhost:8001/api/v1/status" -TimeoutSec 5
+    Write-Host ("    cpu {0}% / mem {1}%   (source: cpu={2}, memory={3})" -f `
+        $edgeStatus.cpu_percent, $edgeStatus.memory_used_percent, `
+        $edgeStatus.metrics_source.cpu, $edgeStatus.metrics_source.memory) -ForegroundColor Gray
+    if ($edgeStatus.metrics_source.memory -eq "psutil") {
+        Warn "Edge has no memory cgroup limit - it is reading HOST memory."
+        Warn "Set a limit in docker/docker-compose.yml (mem_limit: 2g) or raise"
+        Warn "MOCCA_OVERLOAD_MEM_PERCENT, or EDGE rows will really be cloud runs."
+    }
+    if ($edgeStatus.overloaded) {
+        Warn "Edge reports OVERLOADED - it will forward every task to the cloud."
+        Pause-ForUser "Free resources (or raise MOCCA_OVERLOAD_MEM_PERCENT), then press Enter."
+    } else {
+        Ok "Edge has headroom - EDGE decisions will execute on the edge"
+    }
+} catch {
+    Warn "Could not read edge status: $($_.Exception.Message)"
+}
 
 Step "launching app so ContextService starts"
 adb shell am start -n "$PKG/.MainActivity" | Out-Null
@@ -386,6 +582,106 @@ Pause-ForUser "Reconnect laptop to normal Wi-Fi, restore original server URLs in
 Ok "Session H done"
 
 # =============================================================================
+# SESSION I - Mobility sweep  (~60 rows)
+#
+# OffloadingPolicy.pickRemoteTarget picks EDGE only when the device is
+# STATIONARY; anything else goes to CLOUD. LatencyEstimator adds up to 200ms of
+# mobility penalty on the same signal. Neither was ever exercised: a phone on a
+# desk always reports STATIONARY, so every previous dataset had mobilityScore
+# pinned at 1.0 and the branch was untestable from the data.
+# =============================================================================
+
+Section "SESSION I - Mobility Sweep  (target: ~60 rows)"
+Write-Host "  Conditions: movement state forced via debug override, ADAPTIVE mode" -ForegroundColor Gray
+Write-Host "  Expected: STATIONARY -> EDGE, WALKING/VEHICLE -> CLOUD + latency penalty" -ForegroundColor Gray
+
+Assert-ServersHealthy
+Set-ExecMode "ADAPTIVE"
+
+foreach ($state in @("STATIONARY", "WALKING", "VEHICLE")) {
+    Set-Movement $state
+    Run-Task "sha256"            4
+    Run-Task "image-grayscale"   4
+    Run-Task "matrix-multiply"   4
+    Run-Task "video-frame-edges" 3 $VIDEO_DELAY_MS
+}
+
+Step "restoring real accelerometer readings"
+Broadcast $ACTION_DBG "--es movement_state NONE"
+Start-Sleep -Seconds 2
+Ok "Session I done"
+
+# =============================================================================
+# SESSION J - Payload size sweep  (~72 rows)
+#
+# Each task previously had exactly one payload size, so the transmission term of
+# the remote cost (payload / bandwidth) was a per-task constant and its
+# contribution could not be separated from the task's compute cost. Sweeping
+# size within a task type makes that term vary independently of complexity.
+# =============================================================================
+
+Section "SESSION J - Payload Size Sweep  (target: ~72 rows)"
+Write-Host "  Conditions: same task type at varying payload sizes, ADAPTIVE mode" -ForegroundColor Gray
+
+Assert-ServersHealthy
+
+# sha256: 1 KB -> 1 MB. Compute is near-constant, so any latency change is transmission.
+foreach ($bytes in @(1024, 16384, 262144, 1048576)) {
+    Run-Task "sha256" 5 $TASK_DELAY_MS $bytes
+}
+
+# image-grayscale: 128px -> 1024px. Both payload and compute scale with area.
+foreach ($side in @(128, 256, 512, 1024)) {
+    Run-Task "image-grayscale" 5 $TASK_DELAY_MS $side
+}
+
+# matrix-multiply: n=16 -> n=96. Payload grows n^2, compute grows n^3 - the
+# case where offloading should win most clearly at the top end.
+foreach ($n in @(16, 32, 64, 96)) {
+    Run-Task "matrix-multiply" 5 $TASK_DELAY_MS $n
+}
+
+Ok "Session J done"
+
+# =============================================================================
+# SESSION K - Edge under contention  (~45 rows)
+#
+# Emulates other tenants. With one phone the edge executor's 4-slot semaphore
+# never fills, /queue always reads 0, and is_overloaded() never fires - so every
+# latency number so far was measured against an idle server, which is the best
+# case rather than the case adaptive offloading exists for.
+#
+# This is contention EMULATION, not multi-user evaluation: the synthetic clients
+# are processes on this machine, not devices with their own radios. It shows the
+# policy reacts to server-side load; it does not show the system scales to N users.
+# =============================================================================
+
+Section "SESSION K - Edge Under Contention  (target: ~45 rows)"
+Write-Host "  Conditions: 8 synthetic clients saturating the edge, ADAPTIVE mode" -ForegroundColor Gray
+Write-Host "  Expected: edge queue grows, some tasks forwarded to cloud (executed_at=cloud)" -ForegroundColor Gray
+
+Assert-ServersHealthy
+Set-ExecMode "ADAPTIVE"
+
+$python = if (Test-Path ".venv-dev\Scripts\python.exe") { ".venv-dev\Scripts\python.exe" } else { "python" }
+Step "starting background load (8 clients, 180s)"
+$load = Start-Process -FilePath $python `
+    -ArgumentList "evaluation/edge_load_generator.py","--clients","8","--duration","180" `
+    -PassThru -NoNewWindow
+
+Start-Sleep -Seconds 10   # let the queue build before measuring
+
+Run-Task "sha256"            8
+Run-Task "image-grayscale"   8
+Run-Task "matrix-multiply"   8
+Run-Task "video-frame-edges" 5 $VIDEO_DELAY_MS
+
+Step "waiting for the load generator to finish"
+try { $load | Wait-Process -Timeout 120 -ErrorAction Stop } catch { $load | Stop-Process -Force }
+Start-Sleep -Seconds 5
+Ok "Session K done"
+
+# =============================================================================
 # RESTORE + PULL
 # =============================================================================
 
@@ -393,6 +689,11 @@ Section "CLEANUP"
 Set-ExecMode "ADAPTIVE"
 Clear-AllDebug
 Ok "Mode restored to ADAPTIVE, all debug overrides cleared"
+
+Step "removing all network shaping from both containers"
+$null = docker exec $EDGE_CONTAINER  tc qdisc del dev eth0 root 2>&1
+$null = docker exec $CLOUD_CONTAINER tc qdisc del dev eth0 root 2>&1
+Ok "Containers back to an unshaped network"
 
 Section "PULLING CSV"
 $outFile = "evaluation\data\training.csv"
@@ -407,25 +708,42 @@ Ok "Saved to $outFile"
 
 Section "VERIFICATION"
 
-$lines     = Get-Content $outFile
-$totalRows = $lines.Length - 1
+# Parse with ConvertFrom-Csv rather than splitting on commas: `reasoning` is free
+# text that is quoted precisely because it contains commas, and a naive split
+# shifts every column after it.
+$rows = Import-Csv $outFile
+$totalRows = $rows.Count
 
-# Count only new-schema rows (21 columns) - old-schema rows lack the rule column
-$newSchemaRows = $lines | Select-Object -Skip 1 | Where-Object { ($_ -split ',').Count -ge 21 }
-$oldSchemaRows = $totalRows - $newSchemaRows.Count
+# Schema guard. MetricsRecorder archives the CSV when the header changes, so a
+# mixed-schema file should no longer be possible - this catches a stale file
+# pulled from a device still running an older build.
+$REQUIRED = @(
+    'timestamp_iso','task_id','task_name','target','fell_back','actual_ms',
+    'result_bytes','error','rule','battery_percent','is_charging','network_type',
+    'network_score','rtt_ms','bandwidth_mbps','cpu_percent','is_stable',
+    'est_local_ms','est_remote_ms','est_local_energy_mj','est_remote_energy_mj',
+    'speedup','executed_at','server_exec_ms',
+    'measured_power_mw','measured_energy_mj','input_size_bytes',
+    'debug_overrides','reasoning'
+)
+# Note: do NOT wrap this in @(...) - PSObject on an array reflects the array's
+# own members (Count, Length, ...), not the row's columns.
+$firstRow = $rows | Select-Object -First 1
+$present  = $firstRow.PSObject.Properties.Name
+$missing  = $REQUIRED | Where-Object { $_ -notin $present }
 
-Write-Host "  Total rows      : $totalRows" -ForegroundColor White
-Write-Host "  Usable (21-col) : $($newSchemaRows.Count)  (target >= 400)" -ForegroundColor $(if ($newSchemaRows.Count -ge 400) { "Green" } else { "Red" })
-if ($oldSchemaRows -gt 0) {
-    Warn "$oldSchemaRows old-schema rows found (no rule column) - filter these out before RF training"
+Write-Host "  Total rows      : $totalRows  (target >= 400)" -ForegroundColor $(if ($totalRows -ge 400) { "Green" } else { "Red" })
+if ($missing) {
+    Warn "CSV is missing columns: $($missing -join ', ')"
+    Warn "This file came from an older build - reinstall the app and re-collect."
+    return
 }
+Ok "Schema matches MetricsCsvFormat.HEADER ($($REQUIRED.Count) columns)"
 
 Write-Host ""
-Write-Host "  Rule distribution (new-schema rows only):" -ForegroundColor White
+Write-Host "  Rule distribution:" -ForegroundColor White
 
-$dist = $newSchemaRows |
-    ForEach-Object { ($_ -split ',')[8].Trim('"') } |
-    Group-Object | Sort-Object Count -Descending
+$dist = $rows | Group-Object rule | Sort-Object Count -Descending
 
 $minCounts = @{
     "OFFLINE"                      = 30
@@ -449,26 +767,154 @@ foreach ($g in $dist) {
 # Task distribution check
 Write-Host ""
 Write-Host "  Task distribution (should be roughly balanced):" -ForegroundColor White
-$tasks = $newSchemaRows | ForEach-Object { ($_ -split ',')[2].Trim('"') } | Group-Object | Sort-Object Count -Descending
+$tasks = $rows | Group-Object task_name | Sort-Object Count -Descending
 foreach ($t in $tasks) {
-    $pct = [math]::Round(100 * $t.Count / [math]::Max($newSchemaRows.Count, 1))
+    $pct = [math]::Round(100 * $t.Count / [math]::Max($totalRows, 1))
     $clr = if ($pct -gt 40) { "Red" } elseif ($pct -gt 30) { "Yellow" } else { "Green" }
     Write-Host ("    {0,-25} {1,4} ({2}%)" -f $t.Name, $t.Count, $pct) -ForegroundColor $clr
 }
 
 # Fallback rate check
 Write-Host ""
-$fallbacks = ($newSchemaRows | Where-Object { ($_ -split ',')[4].Trim('"').ToLower() -eq "true" }).Count
-$fbPct = [math]::Round(100 * $fallbacks / [math]::Max($newSchemaRows.Count, 1))
+$fallbacks = ($rows | Where-Object { $_.fell_back -eq "true" }).Count
+$fbPct = [math]::Round(100 * $fallbacks / [math]::Max($totalRows, 1))
 $fbClr = if ($fbPct -gt 20) { "Red" } elseif ($fbPct -gt 10) { "Yellow" } else { "Green" }
-Write-Host ("  Fallback rate: {0}/{1} ({2}%)" -f $fallbacks, $newSchemaRows.Count, $fbPct) -ForegroundColor $fbClr
+Write-Host ("  Fallback rate: {0}/{1} ({2}%)" -f $fallbacks, $totalRows, $fbPct) -ForegroundColor $fbClr
 if ($fbPct -gt 20) {
     Warn "High fallback rate means servers were unreachable during collection - re-run after fixing connectivity"
 }
 
+# Decision-integrity check: did the tier that ran the task match the chosen one?
+#
+# edge-server forwards to the cloud whenever ResourceMonitor.is_overloaded() is
+# true, and psutil reports the HOST's memory from inside the container - so on a
+# laptop above 80% RAM every EDGE decision silently executes on the CLOUD, with
+# an extra hop. `executed_at` is the server's own account of where it ran.
+Write-Host ""
+$remoteRows = @($rows | Where-Object {
+    $_.target -in @("EDGE", "CLOUD") -and $_.fell_back -ne "true"
+})
+$mismatched = @($remoteRows | Where-Object { $_.target -ne $_.executed_at.ToUpper() })
+$mmPct = [math]::Round(100 * $mismatched.Count / [math]::Max($remoteRows.Count, 1))
+$mmClr = if ($mmPct -gt 5) { "Red" } else { "Green" }
+Write-Host ("  target != executed_at: {0}/{1} ({2}%)" -f $mismatched.Count, $remoteRows.Count, $mmPct) -ForegroundColor $mmClr
+if ($mmPct -gt 5) {
+    Warn "Edge is forwarding to cloud - free host RAM below 80% and re-run"
+    Warn "Otherwise EDGE latency actually measures an edge->cloud relay"
+    $mismatched | Group-Object target, executed_at |
+        ForEach-Object { Write-Host ("    {0,-20} {1,4}" -f $_.Name, $_.Count) -ForegroundColor DarkYellow }
+}
+
+# Baseline / adaptive condition overlap - needed for the regret analysis in
+# notebook section 15, which compares tiers within matched context buckets.
+Write-Host ""
+$adaptiveTasks = @($rows | Where-Object { $_.rule -notlike "FORCED_*" } | Select-Object -ExpandProperty task_name -Unique)
+$baselineTasks = @($rows | Where-Object { $_.rule -like "FORCED_*" }    | Select-Object -ExpandProperty task_name -Unique)
+$overlap = @($adaptiveTasks | Where-Object { $_ -in $baselineTasks })
+$ovClr = if ($overlap.Count -ge 4) { "Green" } else { "Yellow" }
+Write-Host ("  Tasks with both adaptive and baseline rows: {0}/5" -f $overlap.Count) -ForegroundColor $ovClr
+if ($overlap.Count -lt 4) {
+    Warn "Regret analysis needs the same tasks measured under baseline and adaptive modes"
+}
+
+# Coverage of the dimensions Sessions I / J / K exist to create.
+Write-Host ""
+Write-Host "  Coverage of the new evaluation dimensions:" -ForegroundColor White
+
+$mobilityStates = @($rows | Select-Object -ExpandProperty is_stable -Unique)
+$mobOk = $mobilityStates.Count -ge 2
+Write-Host ("    {0}  mobility: {1} distinct is_stable value(s)" -f `
+    $(if ($mobOk) { "OK " } else { "LOW" }), $mobilityStates.Count) `
+    -ForegroundColor $(if ($mobOk) { "Green" } else { "Red" })
+if (-not $mobOk) { Warn "Session I did not vary movement state - the mobility branch is unobserved" }
+
+$powerRows = @($rows | Where-Object { $_.measured_energy_mj -ne "" }).Count
+$powerPct = [math]::Round(100 * $powerRows / [math]::Max($totalRows, 1))
+$pwClr = if ($powerPct -ge 50) { "Green" } elseif ($powerPct -gt 0) { "Yellow" } else { "Red" }
+Write-Host ("    {0}  measured energy: {1}/{2} rows ({3}%)" -f `
+    $(if ($powerPct -gt 0) { "OK " } else { "N/A" }), $powerRows, $totalRows, $powerPct) `
+    -ForegroundColor $pwClr
+if ($powerPct -eq 0) {
+    Warn "This device does not expose BATTERY_PROPERTY_CURRENT_NOW."
+    Warn "The energy model cannot be validated - report it as unvalidated, do not"
+    Warn "present modelled energy as if it were measured."
+}
+
+# Did the phone actually observe the injected degradation?
+#
+# rtt_ms used to be hardcoded 0, which made network_score a constant for a given
+# transport: netem changed the wall clock but the policy never saw it, so
+# UNSTABLE_NETWORK could not fire and every "degraded" row carried the same
+# context as a healthy one. If these two collapse to a single value, the network
+# sessions are decorative and the RF model has two dead feature columns.
+$rttValues   = @($rows | Where-Object { $_.rtt_ms -ne "" } |
+                 ForEach-Object { [double]$_.rtt_ms })
+$distinctRtt = @($rttValues | Select-Object -Unique).Count
+$maxRtt      = if ($rttValues) { ($rttValues | Measure-Object -Maximum).Maximum } else { 0 }
+$rttOk       = ($distinctRtt -ge 3) -and ($maxRtt -ge 200)
+Write-Host ("    {0}  measured RTT: {1} distinct value(s), max {2}ms" -f `
+    $(if ($rttOk) { "OK " } else { "LOW" }), $distinctRtt, [math]::Round($maxRtt)) `
+    -ForegroundColor $(if ($rttOk) { "Green" } else { "Red" })
+if (-not $rttOk) {
+    Warn "The phone did not observe varying RTT. Either netem never applied, or"
+    Warn "the build on the device predates the measured-RTT probe - reinstall the app."
+}
+
+$scoreValues   = @($rows | Where-Object { $_.network_score -ne "" } |
+                   ForEach-Object { [double]$_.network_score })
+$minScore      = if ($scoreValues) { ($scoreValues | Measure-Object -Minimum).Minimum } else { 1 }
+$scoreOk       = $minScore -lt 0.30
+Write-Host ("    {0}  network score reached {1} (needs < 0.30 for UNSTABLE_NETWORK)" -f `
+    $(if ($scoreOk) { "OK " } else { "LOW" }), [math]::Round($minScore, 2)) `
+    -ForegroundColor $(if ($scoreOk) { "Green" } else { "Red" })
+
+# Is the cloud measurably further away than the edge?
+#
+# actual_ms - server_exec_ms isolates network cost from compute, so it is
+# comparable across tiers even with an unbalanced task mix. Both containers run
+# on this laptop, so without the WAN baseline these two come out equal and every
+# edge-vs-cloud claim in the thesis rests on nothing.
+$netOverhead = @($rows |
+    Where-Object { $_.server_exec_ms -ne "" -and $_.fell_back -ne "true" -and $_.error -eq "" } |
+    ForEach-Object {
+        [pscustomobject]@{
+            Tier      = $_.executed_at.ToUpper()
+            OverheadMs = [double]$_.actual_ms - [double]$_.server_exec_ms
+        }
+    })
+if ($netOverhead) {
+    Write-Host "    network overhead by tier (actual_ms - server_exec_ms):" -ForegroundColor Gray
+    $byTier = @{}
+    foreach ($g in ($netOverhead | Group-Object Tier)) {
+        $median = ($g.Group.OverheadMs | Sort-Object)[[int]($g.Count / 2)]
+        $byTier[$g.Name] = $median
+        Write-Host ("      {0,-8} median {1,6}ms  (n={2})" -f `
+            $g.Name, [math]::Round($median), $g.Count) -ForegroundColor Gray
+    }
+    if ($byTier.ContainsKey("EDGE") -and $byTier.ContainsKey("CLOUD")) {
+        $gap = $byTier["CLOUD"] - $byTier["EDGE"]
+        $gapOk = $gap -ge 30
+        Write-Host ("    {0}  cloud is {1}ms further than edge" -f `
+            $(if ($gapOk) { "OK " } else { "LOW" }), [math]::Round($gap)) `
+            -ForegroundColor $(if ($gapOk) { "Green" } else { "Red" })
+        if (-not $gapOk) {
+            Warn "Edge and cloud are not distinguishable by network cost."
+            Warn "Re-run with -CloudRttMs 80 (default) and confirm tc applied to the cloud."
+        }
+    }
+}
+
+$sizeVariety = @($rows | Group-Object task_name | Where-Object {
+    ($_.Group | Select-Object -ExpandProperty input_size_bytes -Unique).Count -gt 1
+}).Count
+$szClr = if ($sizeVariety -ge 3) { "Green" } else { "Yellow" }
+Write-Host ("    {0}  payload sweep: {1} task type(s) with >1 size" -f `
+    $(if ($sizeVariety -ge 3) { "OK " } else { "LOW" }), $sizeVariety) -ForegroundColor $szClr
+if ($sizeVariety -lt 3) { Warn "Session J did not vary payload size - transmission cost stays confounded with compute" }
+
 Write-Host ""
 $underRep = $dist | Where-Object { $minCounts[$_.Name] -and $_.Count -lt $minCounts[$_.Name] }
-$allOk    = ($newSchemaRows.Count -ge 400) -and (-not $underRep) -and ($fbPct -le 20)
+$allOk    = ($totalRows -ge 400) -and (-not $underRep) -and ($fbPct -le 20) -and ($mmPct -le 5)
 
 if ($allOk) {
     Write-Host "  All checks passed. Proceed to Phase 2 training notebook." -ForegroundColor Cyan

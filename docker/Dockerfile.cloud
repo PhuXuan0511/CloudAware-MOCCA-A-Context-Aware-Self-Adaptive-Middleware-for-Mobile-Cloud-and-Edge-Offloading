@@ -2,6 +2,13 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
+# iproute2 provides `tc`. The cloud tier is not shaped by the current Phase 1
+# runbook, but keeping the images symmetric means a future session can degrade
+# either tier without rebuilding. See Dockerfile.edge for the full rationale.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends iproute2 \
+    && rm -rf /var/lib/apt/lists/*
+
 COPY shared/ ./shared/
 COPY cloud-server/ ./cloud_server/
 COPY cloud-server/requirements.txt .

@@ -37,7 +37,14 @@ class MiddlewareApp : Application() {
 
     // ── Context layer ─────────────────────────────────────────────────────
     val contextManager: ContextManager by lazy {
-        ContextManager(context = this, scope = appScope).also { cm ->
+        ContextManager(
+            context = this,
+            scope = appScope,
+            // ConnectionManager already times its /health probe; feeding it in
+            // here is what makes rtt_ms a measurement rather than a constant 0,
+            // and what lets the policy see a degraded link at all.
+            networkProbe = connectionManager,
+        ).also { cm ->
             // Restore any persisted debug overrides so they survive process restarts.
             cm.debugNetworkScore = endpointsRepository.debugNetworkScore
             cm.debugBatteryPercent = endpointsRepository.debugBatteryPercent
@@ -85,6 +92,15 @@ class MiddlewareApp : Application() {
         )
     }
 
+    /**
+     * Reads whole-device power from the battery current sensor. Constructed
+     * once — `registerReceiver(null, ...)` for a sticky broadcast is cheap, but
+     * the BatteryManager service lookup is not worth repeating per task.
+     */
+    private val powerCollector by lazy {
+        com.thesis.middleware.context.collectors.BatteryCollector(this)
+    }
+
     val executionProxy: ExecutionProxy by lazy {
         ExecutionProxy(
             mapeLoop = mapeLoop,
@@ -92,6 +108,9 @@ class MiddlewareApp : Application() {
             // Read the persisted mode on every task — Settings changes take
             // effect immediately for the next tap, no service restart needed.
             modeProvider = { endpointsRepository.executionMode },
+            // Measured energy, to validate EnergyEstimator's hard-coded
+            // 800 / 1500 / 50 mW coefficients against something observed.
+            powerSampler = { powerCollector.samplePowerMilliWatts() },
         )
     }
 

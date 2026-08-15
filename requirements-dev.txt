@@ -1,0 +1,16 @@
+# Test + evaluation tooling. Not installed into the server images.
+#
+#   python -m venv .venv-dev
+#   .\.venv-dev\Scripts\Activate.ps1
+#   pip install -r requirements-dev.txt -r edge-server/requirements.txt
+#   pytest
+
+pytest==8.2.2
+pytest-asyncio==0.23.7
+
+# Notebook / analysis stack (evaluation/notebooks/random-forest-training.ipynb)
+pandas==2.2.2
+scikit-learn==1.5.0
+matplotlib==3.9.0
+seaborn==0.13.2
+jupyter==1.0.0

@@ -318,6 +318,9 @@ class MainActivity : Activity() {
         "BALANCED_COST"                -> "Balanced cost (default)"
         "FORCED_LOCAL"                 -> "Local-only mode (baseline — MAPE bypassed)"
         "FORCED_CLOUD"                 -> "Cloud-only mode (baseline — no fallback)"
+        "ML_PREDICTED_LOCAL"           -> "Random Forest predicted → local execution"
+        "ML_PREDICTED_EDGE"            -> "Random Forest predicted → edge"
+        "ML_PREDICTED_CLOUD"           -> "Random Forest predicted → cloud"
         else                           -> ruleId
     }
 
@@ -378,6 +381,11 @@ class MainActivity : Activity() {
                 "${"%.1f".format(remote)} → " +
                 if (target == ExecutionTarget.LOCAL) "local wins." else "$target wins."
         }
+
+        "ML_PREDICTED_LOCAL", "ML_PREDICTED_EDGE", "ML_PREDICTED_CLOUD" ->
+            "No hand-written rule fired — the Random Forest read the same 12 " +
+                "context signals and voted for $target. See the \"Why:\" line " +
+                "for the per-class vote share."
 
         else -> "Unknown rule id: $ruleId"
     }

@@ -11,10 +11,17 @@ import kotlinx.coroutines.*
 class ContextManager(
     private val context: Context,
     private val scope: CoroutineScope,
-    private val collectionIntervalMs: Long = DEFAULT_COLLECTION_INTERVAL_MS
+    private val collectionIntervalMs: Long = DEFAULT_COLLECTION_INTERVAL_MS,
+    /**
+     * Supplies the measured RTT to the offload target. Defaults to
+     * [NetworkQualityProbe.NONE], which reports 0 and leaves scoring on the
+     * capability-only path — so a ContextManager built without one behaves
+     * exactly as it did before RTT was measured.
+     */
+    private val networkProbe: NetworkQualityProbe = NetworkQualityProbe.NONE,
 ) {
 
-    private val networkCollector = NetworkCollector(context)
+    private val networkCollector = NetworkCollector(context) { networkProbe.lastRttMs }
     private val cpuCollector = CpuCollector()
     private val batteryCollector = BatteryCollector(context)
     private val locationCollector = LocationCollector(context)
@@ -29,6 +36,11 @@ class ContextManager(
         if (collectionJob?.isActive == true) return
         collectionJob = scope.launch {
             while (isActive) {
+                // Drives the only measurement the middleware makes of the path
+                // to the server. It is TTL-gated inside the probe, so ticking it
+                // every interval costs at most one /health GET per TTL. Kept
+                // ahead of the snapshot so a fresh sample lands in this round.
+                networkProbe.refresh()
                 historyStore.save(collectSnapshot())
                 delay(collectionIntervalMs)
             }
@@ -57,11 +69,32 @@ class ContextManager(
      */
     var debugBatteryPercent: Int? = null
 
+    /**
+     * Debug-only override for the accelerometer-derived movement state.
+     *
+     * `MobilityCollector` only ever reports STATIONARY for a phone sitting on a
+     * desk, so WALKING and VEHICLE — and therefore the mobility branch of
+     * `OffloadingPolicy.pickRemoteTarget` (EDGE vs CLOUD) and the mobility
+     * penalty in `LatencyEstimator` — were never exercised during collection.
+     * Forcing the state lets a session sweep all three without physically
+     * moving, at the cost of the accelerometer path itself being simulated.
+     * Set to null to restore real sensor readings.
+     */
+    var debugMovementState: MovementState? = null
+
     fun getLatestFeatures(): ContextFeatures {
         val rawSnapshot = collectSnapshot()
-        val snapshot = debugBatteryPercent?.let { pct ->
-            rawSnapshot.copy(battery = rawSnapshot.battery.copy(levelPercent = pct, isCharging = false))
-        } ?: rawSnapshot
+        var snapshot = rawSnapshot
+        debugBatteryPercent?.let { pct ->
+            snapshot = snapshot.copy(
+                battery = snapshot.battery.copy(levelPercent = pct, isCharging = false)
+            )
+        }
+        debugMovementState?.let { state ->
+            snapshot = snapshot.copy(
+                mobility = snapshot.mobility.copy(movementState = state)
+            )
+        }
         historyStore.save(snapshot)
         val features = featureExtractor.extract(snapshot)
         return debugNetworkScore?.let { features.copy(networkScore = it) } ?: features

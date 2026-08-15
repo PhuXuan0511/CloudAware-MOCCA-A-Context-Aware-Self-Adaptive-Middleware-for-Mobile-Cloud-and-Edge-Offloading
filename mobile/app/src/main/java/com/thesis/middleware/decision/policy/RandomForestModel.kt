@@ -21,6 +21,16 @@ class RandomForestModel(
     val featureNames: List<String>,
     val classes: List<String>,
     private val trees: List<Tree>,
+    /**
+     * Categorical encodings the notebook used when building the training
+     * features, e.g. `network_rank = {NONE:0, LTE:1, WIFI:2, FIVE_G:3}`.
+     *
+     * Exported so the on-device extractor can be checked against them. Without
+     * that check a renamed or reordered category silently shifts a feature —
+     * `feature_names` is unchanged, so the feature-order assertion passes while
+     * every prediction reads a differently-encoded column.
+     */
+    val encodings: Map<String, Map<String, Int>> = emptyMap(),
 ) {
 
     val treeCount: Int get() = trees.size
@@ -124,7 +134,16 @@ class RandomForestModel(
                 )
             }
 
-            return RandomForestModel(featureNames, classes, trees)
+            val encodings = ENCODING_KEYS.mapNotNull { key ->
+                val obj = root.optJSONObject(key) ?: return@mapNotNull null
+                key to obj.keys().asSequence().associateWith { obj.getInt(it) }
+            }.toMap()
+
+            return RandomForestModel(featureNames, classes, trees, encodings)
         }
+
+        /** Categorical encoding maps the notebook exports alongside the trees. */
+        private val ENCODING_KEYS =
+            listOf("network_rank", "task_complexity", "complexity_rank")
     }
 }

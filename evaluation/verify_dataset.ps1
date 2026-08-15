@@ -43,34 +43,20 @@ Section "VERIFICATION"
 # Parse with ConvertFrom-Csv rather than splitting on commas: `reasoning` is free
 # text that is quoted precisely because it contains commas, and a naive split
 # shifts every column after it.
-$rows = Import-Csv $outFile
+$rows = @(Import-Csv $outFile)
 $totalRows = $rows.Count
 
-# Schema guard. MetricsRecorder archives the CSV when the header changes, so a
-# mixed-schema file should no longer be possible - this catches a stale file
-# pulled from a device still running an older build.
-$REQUIRED = @(
-    'timestamp_iso','task_id','task_name','target','fell_back','actual_ms',
-    'result_bytes','error','rule','battery_percent','is_charging','network_type',
-    'network_score','rtt_ms','bandwidth_mbps','cpu_percent','is_stable',
-    'est_local_ms','est_remote_ms','est_local_energy_mj','est_remote_energy_mj',
-    'speedup','executed_at','server_exec_ms',
-    'measured_power_mw','measured_energy_mj','input_size_bytes',
-    'debug_overrides','reasoning'
-)
-# Note: do NOT wrap this in @(...) - PSObject on an array reflects the array's
-# own members (Count, Length, ...), not the row's columns.
-$firstRow = $rows | Select-Object -First 1
-$present  = $firstRow.PSObject.Properties.Name
-$missing  = $REQUIRED | Where-Object { $_ -notin $present }
+# No schema check here. The notebook already refuses to load a CSV whose columns
+# do not match MetricsCsvFormat.HEADER, and it does so at the point where the
+# columns are actually used - duplicating it here only produced a 29-name wall
+# of text whenever the file was empty or pointed at the wrong path.
+if ($totalRows -eq 0) {
+    Warn "$outFile has no rows - nothing to check."
+    Warn "Point -Path at a collected CSV, or run .\evaluation\collect_data.ps1."
+    exit 1
+}
 
 Write-Host "  Total rows      : $totalRows  (target >= 400)" -ForegroundColor $(if ($totalRows -ge 400) { "Green" } else { "Red" })
-if ($missing) {
-    Warn "CSV is missing columns: $($missing -join ', ')"
-    Warn "This file came from an older build - reinstall the app and re-collect."
-    return
-}
-Ok "Schema matches MetricsCsvFormat.HEADER ($($REQUIRED.Count) columns)"
 
 Write-Host ""
 Write-Host "  Rule distribution:" -ForegroundColor White

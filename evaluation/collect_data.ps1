@@ -29,7 +29,10 @@ $ACTION_CLR     = "$PKG.CLEAR_DEBUG"
 
 $TASK_DELAY_MS  = 3000
 $VIDEO_DELAY_MS = 6000
-$EDGE_CONTAINER = "docker-edge-server-1"
+# Discovered in pre-flight via the compose service label rather than hardcoded:
+# the generated name depends on the compose project and on the v1/v2 separator
+# ("docker_edge-server_1" vs "docker-edge-server-1").
+$EDGE_CONTAINER = $null
 
 # =============================================================================
 # HELPERS
@@ -84,10 +87,68 @@ function Clear-AllDebug {
     Start-Sleep -Seconds 1
 }
 
+# Resolve the edge container by its compose service label, which is stable across
+# compose v1/v2 naming and any project name.
+function Resolve-EdgeContainer {
+    $name = docker ps --filter "label=com.docker.compose.service=edge-server" `
+                      --format "{{.Names}}" | Select-Object -First 1
+    if (-not $name) {
+        # Fall back to a name match for containers started outside compose.
+        $name = docker ps --format "{{.Names}}" |
+                Where-Object { $_ -match "edge" } | Select-Object -First 1
+    }
+    return $name
+}
+
+# Verify tc is usable BEFORE any session depends on it.
+#
+# Two separate failure modes, both previously silent because the tc output was
+# piped to Out-Null and the exit code never checked:
+#   1. `tc` is absent      - python:3.11-slim ships no iproute2
+#   2. "Operation not permitted" - the container lacks NET_ADMIN
+# Either one means Session C records normal-network rows while claiming to have
+# injected 500ms/20% loss, and UNSTABLE_NETWORK barely fires.
+function Assert-NetemUsable {
+    Step "verifying tc/netem works inside $EDGE_CONTAINER"
+
+    $probe = docker exec $EDGE_CONTAINER tc qdisc show dev eth0 2>&1 | Out-String
+    if ($LASTEXITCODE -ne 0 -or $probe -match "not found|executable file") {
+        Warn "tc is not available in the edge container."
+        Warn "The image needs iproute2 - rebuild with:"
+        Warn "  docker compose -f docker/docker-compose.yml up -d --build"
+        return $false
+    }
+
+    $null = docker exec $EDGE_CONTAINER tc qdisc del dev eth0 root 2>&1
+    $add = docker exec $EDGE_CONTAINER tc qdisc add dev eth0 root netem delay 1ms 2>&1 | Out-String
+    if ($LASTEXITCODE -ne 0 -or $add -match "not permitted|Error") {
+        Warn "tc exists but cannot modify qdiscs: $($add.Trim())"
+        Warn "The container needs NET_ADMIN. docker-compose.yml grants it via cap_add;"
+        Warn "recreate the containers so the capability takes effect:"
+        Warn "  docker compose -f docker/docker-compose.yml up -d --force-recreate"
+        return $false
+    }
+
+    $null = docker exec $EDGE_CONTAINER tc qdisc del dev eth0 root 2>&1
+    Ok "tc/netem works - Session C will inject real network degradation"
+    return $true
+}
+
 function Set-Netem($delay, $loss) {
     Step "netem -> delay=${delay}ms loss=${loss}%"
     $null = docker exec $EDGE_CONTAINER tc qdisc del dev eth0 root 2>&1
-    docker exec $EDGE_CONTAINER tc qdisc add dev eth0 root netem delay "${delay}ms" loss "${loss}%" | Out-Null
+    $out = docker exec $EDGE_CONTAINER tc qdisc add dev eth0 root netem `
+               delay "${delay}ms" loss "${loss}%" 2>&1 | Out-String
+
+    # Confirm the qdisc is actually in place rather than trusting the exit code.
+    $shown = docker exec $EDGE_CONTAINER tc qdisc show dev eth0 2>&1 | Out-String
+    if ($shown -notmatch "netem") {
+        Warn "netem did NOT apply: $($out.Trim())"
+        Warn "These rows would be labelled as degraded but collected on a healthy link."
+        Pause-ForUser "Fix netem (see Assert-NetemUsable output above) then press Enter, or Ctrl+C to abort."
+    } else {
+        Write-Host "    active: $($shown.Trim())" -ForegroundColor DarkGray
+    }
     Start-Sleep -Seconds 8   # FIX-D: increased from 6s so NetworkCollector re-probes
 }
 
@@ -144,12 +205,31 @@ Ok "Device: $device"
 
 $containers = docker ps --format "{{.Names}}" | Where-Object { $_ -match "edge|cloud" }
 if (-not $containers) {
-    Write-Error "Edge/cloud containers not running. Run 'docker compose up -d' first."
+    Write-Error "Edge/cloud containers not running. Run 'docker compose -f docker/docker-compose.yml up -d --build' first."
     exit 1
 }
 Ok "Containers: $($containers -join ', ')"
 
+$EDGE_CONTAINER = Resolve-EdgeContainer
+if (-not $EDGE_CONTAINER) {
+    Write-Error "Could not identify the edge container. Is docker compose up?"
+    exit 1
+}
+Ok "Edge container: $EDGE_CONTAINER"
+
 Assert-ServersHealthy
+
+# Session C is worthless if netem cannot be applied, so check now rather than
+# discovering it 20 minutes in.
+$netemOk = Assert-NetemUsable
+if (-not $netemOk) {
+    Warn "Session C would collect normal-network rows labelled as degraded."
+    Pause-ForUser "Rebuild/recreate the containers as described above, then press Enter to re-check."
+    $netemOk = Assert-NetemUsable
+    if (-not $netemOk) {
+        Pause-ForUser "netem still unavailable. Press Enter to continue anyway (Session C data will NOT be degraded), or Ctrl+C to abort."
+    }
+}
 
 # The edge forwards to the cloud when it considers itself overloaded. Since the
 # monitor became cgroup-aware this reflects the container's own budget, but a

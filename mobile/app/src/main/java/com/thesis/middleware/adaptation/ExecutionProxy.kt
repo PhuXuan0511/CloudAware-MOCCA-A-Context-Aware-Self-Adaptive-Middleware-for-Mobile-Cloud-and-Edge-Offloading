@@ -41,6 +41,16 @@ class ExecutionProxy(
      * Default returns [ExecutionMode.ADAPTIVE] — full MAPE behaviour.
      */
     private val modeProvider: () -> ExecutionMode = { ExecutionMode.ADAPTIVE },
+    /**
+     * Samples whole-device power draw in mW, or returns null when the device
+     * does not expose battery current.
+     *
+     * Injected rather than read directly so the proxy stays free of Android
+     * dependencies and testable on the JVM. Wired to
+     * [com.thesis.middleware.context.collectors.BatteryCollector.samplePowerMilliWatts]
+     * by [com.thesis.middleware.MiddlewareApp].
+     */
+    private val powerSampler: () -> Float? = { null },
 ) {
 
     private val _events = MutableSharedFlow<ExecutionEvent>(
@@ -51,6 +61,10 @@ class ExecutionProxy(
 
     suspend fun run(task: OffloadableTask): ByteArray {
         val startMs = System.currentTimeMillis()
+        // Sampled either side of the run and averaged. Coarse — the platform
+        // updates battery current at roughly 1 Hz — but it is a measurement,
+        // which is what the modelled energy figures currently lack.
+        val powerBefore = powerSampler()
         val mode = modeProvider()
         // Always run MAPE Analyze (estimator + signals) so the log entry has a
         // populated context snapshot even in baseline modes. The Plan-phase
@@ -88,6 +102,16 @@ class ExecutionProxy(
         }
 
         fun emit(resultSize: Int) {
+            val elapsedMs = System.currentTimeMillis() - startMs
+            // Mean of the two samples over the run window. Null unless the
+            // device reported current at BOTH ends — a single sample would
+            // silently halve or double the figure.
+            val powerAfter = powerSampler()
+            val meanPowerMw = if (powerBefore != null && powerAfter != null) {
+                (powerBefore + powerAfter) / 2f
+            } else null
+            val measuredEnergyMj = meanPowerMw?.let { it * elapsedMs / 1000f }
+
             if (!fellBack && decision.target != ExecutionTarget.LOCAL &&
                 errorMessage == null &&
                 !executedAt.equals(decision.target.name, ignoreCase = true)
@@ -103,12 +127,15 @@ class ExecutionProxy(
                     taskId = task.id,
                     taskName = task.name,
                     decision = decision,
-                    actualMs = System.currentTimeMillis() - startMs,
+                    actualMs = elapsedMs,
                     resultSizeBytes = resultSize,
                     fellBackToLocal = fellBack,
                     errorMessage = errorMessage,
                     executedAt = executedAt,
                     serverExecMs = serverExecMs,
+                    measuredPowerMw = meanPowerMw,
+                    measuredEnergyMj = measuredEnergyMj,
+                    inputSizeBytes = task.inputSizeBytes,
                 )
             )
         }
@@ -213,4 +240,25 @@ data class ExecutionEvent(
      * `actualMs - serverExecMs` isolates the network overhead.
      */
     val serverExecMs: Float? = null,
+    /**
+     * Mean whole-device power draw in mW over the run window, from the battery
+     * current sensor. Null on devices that do not expose `CURRENT_NOW`.
+     */
+    val measuredPowerMw: Float? = null,
+    /**
+     * `measuredPowerMw × actualMs`, in millijoules — the measured counterpart to
+     * `EnergyEstimator`'s modelled figure.
+     *
+     * Whole-device draw, so it is an upper bound on the task's own cost rather
+     * than an attribution. Its value is in validating the *shape* of the energy
+     * model (does modelled energy track measured energy?) and in deriving a
+     * calibration factor for the hard-coded power coefficients.
+     */
+    val measuredEnergyMj: Float? = null,
+    /**
+     * Payload size submitted, in bytes. Recorded because payload size is now
+     * varied within a task type, so it can no longer be inferred from
+     * `taskName` alone.
+     */
+    val inputSizeBytes: Long = 0,
 )

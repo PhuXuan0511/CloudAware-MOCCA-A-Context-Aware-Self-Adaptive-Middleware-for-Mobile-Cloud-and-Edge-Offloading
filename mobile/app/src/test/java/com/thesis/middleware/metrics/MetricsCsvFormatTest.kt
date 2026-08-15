@@ -51,6 +51,9 @@ class MetricsCsvFormatTest {
         executedAt: String = "edge",
         serverExecMs: Float? = 180f,
         debugOverrides: String = "",
+        measuredPowerMw: Float? = 2100f,
+        measuredEnergyMj: Float? = 1075f,
+        inputSizeBytes: Long = 64_000,
     ) = ExecutionEvent(
         taskId = "task-1",
         taskName = "matrix-multiply",
@@ -68,12 +71,15 @@ class MetricsCsvFormatTest {
         errorMessage = errorMessage,
         executedAt = executedAt,
         serverExecMs = serverExecMs,
+        measuredPowerMw = measuredPowerMw,
+        measuredEnergyMj = measuredEnergyMj,
+        inputSizeBytes = inputSizeBytes,
     )
 
     // ── Schema ────────────────────────────────────────────────────────────────
 
     @Test
-    fun `header lists the 26 columns the notebook reads`() {
+    fun `header lists the 29 columns the notebook reads`() {
         assertEquals(
             listOf(
                 "timestamp_iso", "task_id", "task_name", "target", "fell_back",
@@ -82,12 +88,49 @@ class MetricsCsvFormatTest {
                 "bandwidth_mbps", "cpu_percent", "is_stable",
                 "est_local_ms", "est_remote_ms",
                 "est_local_energy_mj", "est_remote_energy_mj",
-                "speedup", "executed_at", "server_exec_ms", "debug_overrides",
-                "reasoning",
+                "speedup", "executed_at", "server_exec_ms",
+                "measured_power_mw", "measured_energy_mj", "input_size_bytes",
+                "debug_overrides", "reasoning",
             ),
             MetricsCsvFormat.HEADER.split(","),
         )
-        assertEquals(26, MetricsCsvFormat.COLUMN_COUNT)
+        assertEquals(29, MetricsCsvFormat.COLUMN_COUNT)
+    }
+
+    @Test
+    fun `measured energy is recorded next to the modelled estimate`() {
+        // The whole point: est_local_energy_mj is a model output, measured_energy_mj
+        // is an observation, and the notebook regresses one against the other.
+        val header = MetricsCsvFormat.HEADER.split(",")
+        val fields = MetricsCsvFormat.row(
+            event(measuredPowerMw = 2450.5f, measuredEnergyMj = 1254.6f),
+            "2026-08-15T10:00:00.000",
+        ).split(",")
+        assertEquals("2450.5", fields[header.indexOf("measured_power_mw")])
+        assertEquals("1254.6", fields[header.indexOf("measured_energy_mj")])
+    }
+
+    @Test
+    fun `devices without a current sensor leave the measured columns empty`() {
+        // Not every phone implements BATTERY_PROPERTY_CURRENT_NOW. Zero would be
+        // read as "this task used no energy" and would poison any mean.
+        val header = MetricsCsvFormat.HEADER.split(",")
+        val fields = MetricsCsvFormat.row(
+            event(measuredPowerMw = null, measuredEnergyMj = null),
+            "2026-08-15T10:00:00.000",
+        ).split(",")
+        assertEquals("", fields[header.indexOf("measured_power_mw")])
+        assertEquals("", fields[header.indexOf("measured_energy_mj")])
+    }
+
+    @Test
+    fun `payload size is recorded because it now varies within a task type`() {
+        val header = MetricsCsvFormat.HEADER.split(",")
+        val fields = MetricsCsvFormat.row(
+            event(inputSizeBytes = 262_144),
+            "2026-08-15T10:00:00.000",
+        ).split(",")
+        assertEquals("262144", fields[header.indexOf("input_size_bytes")])
     }
 
     @Test

@@ -34,7 +34,9 @@ object MetricsCsvFormat {
             "rule,battery_percent,is_charging,network_type,network_score," +
             "rtt_ms,bandwidth_mbps,cpu_percent,is_stable," +
             "est_local_ms,est_remote_ms,est_local_energy_mj,est_remote_energy_mj," +
-            "speedup,executed_at,server_exec_ms,debug_overrides,reasoning"
+            "speedup,executed_at,server_exec_ms," +
+            "measured_power_mw,measured_energy_mj,input_size_bytes," +
+            "debug_overrides,reasoning"
 
     /** Number of columns a well-formed row must have. */
     val COLUMN_COUNT: Int = HEADER.split(",").size
@@ -82,6 +84,14 @@ object MetricsCsvFormat {
             // trusted when attributing measured latency to a tier.
             event.executedAt,
             event.serverExecMs?.let { fmt1(it) } ?: "",
+            // Measured counterpart to est_*_energy_mj, from the battery current
+            // sensor. Empty on devices that do not expose CURRENT_NOW. Whole-
+            // device draw, so an upper bound rather than a per-task attribution.
+            event.measuredPowerMw?.let { fmt1(it) } ?: "",
+            event.measuredEnergyMj?.let { fmt1(it) } ?: "",
+            // Payload size actually sent, so the transmission term of the cost
+            // model can be regressed against something that varies.
+            event.inputSizeBytes.toString(),
             // Non-empty when a debug override replaced a real estimator output
             // (collect_data.ps1 Session B does this). Those rows must be excluded
             // from cost-model validation.

@@ -4,6 +4,7 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import com.thesis.middleware.adaptation.ExecutionMode
+import com.thesis.middleware.context.MovementState
 import com.thesis.middleware.demo.DemoTasks
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -37,14 +38,19 @@ class AutoRunReceiver : BroadcastReceiver() {
         val taskName = intent.getStringExtra("task") ?: return
         val count    = intent.getIntExtra("count", 1)
         val delayMs  = intent.getLongExtra("delay_ms", DEFAULT_DELAY_MS)
+        // Optional --ei size: payload bytes for sha256, image edge length for
+        // image-grayscale, matrix dimension for matrix-multiply. Omit or pass
+        // <= 0 for the task's default. Varying it exercises the transmission
+        // term of the cost model, which is otherwise constant per task type.
+        val size     = intent.getIntExtra("size", -1)
 
         app.appScope.launch {
             repeat(count) {
                 val task = when (taskName) {
                     "echo"              -> DemoTasks.echo()
-                    "sha256"            -> DemoTasks.sha256()
-                    "image-grayscale"   -> DemoTasks.imageGrayscale()
-                    "matrix-multiply"   -> DemoTasks.matrixMultiply()
+                    "sha256"            -> if (size > 0) DemoTasks.sha256(size) else DemoTasks.sha256()
+                    "image-grayscale"   -> if (size > 0) DemoTasks.imageGrayscale(size) else DemoTasks.imageGrayscale()
+                    "matrix-multiply"   -> if (size > 0) DemoTasks.matrixMultiply(size) else DemoTasks.matrixMultiply()
                     "video-frame-edges" -> DemoTasks.videoFrameEdges(context)
                     else -> return@repeat
                 }
@@ -78,6 +84,15 @@ class AutoRunReceiver : BroadcastReceiver() {
             val override = if (v < 0f) null else v
             app.endpointsRepository.debugRemoteEnergyMj = override
             app.mapeLoop.debugRemoteEnergyMj = override
+        }
+        // --es movement_state STATIONARY|WALKING|VEHICLE, or "NONE" to clear.
+        // Lets a session exercise pickRemoteTarget's EDGE/CLOUD branch and the
+        // mobility latency penalty without physically moving the phone.
+        if (intent.hasExtra("movement_state")) {
+            val name = intent.getStringExtra("movement_state")
+            app.contextManager.debugMovementState =
+                if (name.isNullOrEmpty() || name == "NONE") null
+                else runCatching { MovementState.valueOf(name) }.getOrNull()
         }
     }
 

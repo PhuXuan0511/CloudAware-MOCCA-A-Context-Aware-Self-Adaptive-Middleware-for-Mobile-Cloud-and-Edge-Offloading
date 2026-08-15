@@ -39,6 +39,7 @@ object DemoTasks {
 
     private const val MATRIX_N = 32
     private const val SYNTHETIC_IMAGE_SIDE = 512
+    private const val SHA_PAYLOAD_BYTES = 1024
     private const val VIDEO_ASSET_NAME = "sample_video.mp4"
     private const val SEED = 0xC0FFEEL
 
@@ -54,8 +55,16 @@ object DemoTasks {
         )
     }
 
-    fun sha256(): OffloadableTask {
-        val payload = ByteArray(1024).also { Random(SEED).nextBytes(it) }
+    /**
+     * @param sizeBytes payload size. Varying it moves the transmission term
+     *   (`payload / bandwidth`) of the remote cost while holding compute
+     *   roughly constant — with one fixed size per task the term is effectively
+     *   a constant per task type and the model's payload sensitivity cannot be
+     *   observed at all.
+     */
+    fun sha256(sizeBytes: Int = SHA_PAYLOAD_BYTES): OffloadableTask {
+        val payload = ByteArray(sizeBytes.coerceAtLeast(1))
+            .also { Random(SEED).nextBytes(it) }
         return OffloadableTask(
             id = "sha256-${System.currentTimeMillis()}",
             name = "sha256",
@@ -66,8 +75,9 @@ object DemoTasks {
         )
     }
 
-    fun imageGrayscale(): OffloadableTask {
-        val payload = generateSyntheticJpeg(SYNTHETIC_IMAGE_SIDE)
+    /** @param side image edge length in pixels; payload grows roughly with side². */
+    fun imageGrayscale(side: Int = SYNTHETIC_IMAGE_SIDE): OffloadableTask {
+        val payload = generateSyntheticJpeg(side.coerceIn(32, 2048))
         return OffloadableTask(
             id = "img-gray-${System.currentTimeMillis()}",
             name = "image-grayscale",

@@ -85,6 +85,15 @@ class MiddlewareApp : Application() {
         )
     }
 
+    /**
+     * Reads whole-device power from the battery current sensor. Constructed
+     * once — `registerReceiver(null, ...)` for a sticky broadcast is cheap, but
+     * the BatteryManager service lookup is not worth repeating per task.
+     */
+    private val powerCollector by lazy {
+        com.thesis.middleware.context.collectors.BatteryCollector(this)
+    }
+
     val executionProxy: ExecutionProxy by lazy {
         ExecutionProxy(
             mapeLoop = mapeLoop,
@@ -92,6 +101,9 @@ class MiddlewareApp : Application() {
             // Read the persisted mode on every task — Settings changes take
             // effect immediately for the next tap, no service restart needed.
             modeProvider = { endpointsRepository.executionMode },
+            // Measured energy, to validate EnergyEstimator's hard-coded
+            // 800 / 1500 / 50 mW coefficients against something observed.
+            powerSampler = { powerCollector.samplePowerMilliWatts() },
         )
     }
 

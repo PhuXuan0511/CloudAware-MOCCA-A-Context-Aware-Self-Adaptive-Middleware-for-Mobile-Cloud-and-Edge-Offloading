@@ -12,7 +12,7 @@ classifier to learn the offloading policy. Target ≥ 300 rows with all
 
 Pulled to `evaluation/data/training.csv` after collection.
 
-## CSV schema reminder (26 columns)
+## CSV schema reminder (29 columns)
 
 Defined by `MetricsCsvFormat.HEADER` in the Android app — that constant is the
 single source of truth, and `MetricsCsvFormatTest` pins it.
@@ -22,7 +22,9 @@ timestamp_iso, task_id, task_name, target, fell_back, actual_ms, result_bytes, e
 rule, battery_percent, is_charging, network_type, network_score,
 rtt_ms, bandwidth_mbps, cpu_percent, is_stable,
 est_local_ms, est_remote_ms, est_local_energy_mj, est_remote_energy_mj,
-speedup, executed_at, server_exec_ms, debug_overrides, reasoning
+speedup, executed_at, server_exec_ms,
+measured_power_mw, measured_energy_mj, input_size_bytes,
+debug_overrides, reasoning
 ```
 
 `target` is the label for supervised learning; `rule` identifies which policy
@@ -37,6 +39,25 @@ Three columns exist purely for evaluation and are **excluded from training**
 | `executed_at` | The server's own account of which tier ran the task (`edge` / `cloud` / `local`). `edge-server` forwards to the cloud when overloaded, so `target` alone does not tell you where the work ran. |
 | `server_exec_ms` | Server-measured handler time. `actual_ms - server_exec_ms` isolates network overhead from compute. |
 | `debug_overrides` | Which debug overrides were in force, e.g. `remote_energy_mj=50.0`. Session B sets this to force `LOW_BATTERY_OFFLOAD` to fire, which writes a **synthetic** value into `est_remote_energy_mj`. The notebook excludes these rows from cost-model validation; without the marker they are indistinguishable from real estimates. |
+| `measured_power_mw` / `measured_energy_mj` | Whole-device power from `BATTERY_PROPERTY_CURRENT_NOW` (`P = V × I`), sampled either side of each run. The **measured** counterpart to `EnergyEstimator`'s hard-coded 800/1500/50 mW coefficients. Empty on devices that do not implement the property. |
+| `input_size_bytes` | Payload actually submitted. Session J varies size within a task type, so it can no longer be inferred from `task_name`. |
+
+### Reading the measured energy columns honestly
+
+Three limits apply to every number derived from them, and belong in the thesis
+next to the number itself:
+
+1. **Whole-device draw** — screen, radio, and background work are included, so
+   it is an upper bound on the task's cost, not an attribution to the task.
+2. **~1 Hz sampling** — tasks shorter than ~500 ms are measured poorly; the
+   notebook filters them out of the energy analysis.
+3. **Not universally supported** — some devices return 0 or `Integer.MIN_VALUE`
+   for `CURRENT_NOW`. The collector treats both as "unsupported" and leaves the
+   columns empty rather than logging a fabricated zero.
+
+What they support is a claim that the model **tracks** measured energy, and an
+empirically implied CPU coefficient. They do not support a claim of calibrated
+absolute per-task energy — that needs an external power monitor.
 
 ### Schema changes
 
@@ -67,6 +88,23 @@ Plus baseline modes for the Phase 2 comparison:
 |-------------|-------------|-----|
 | LOCAL_ONLY  | 30 | Switch mode in Settings, tap each of the 5 tasks ×6 |
 | CLOUD_ONLY  | 30 | Same |
+
+### Sessions I–K: closing the gaps a reviewer would find
+
+Three dimensions the earlier runbook never varied, each of which left a claim in
+the thesis unsupported by the data:
+
+| Session | Dimension | Why it exists |
+|---------|-----------|---------------|
+| **I — Mobility sweep** | Forces STATIONARY / WALKING / VEHICLE | `pickRemoteTarget` routes to EDGE only when stationary, and `LatencyEstimator` adds up to 200 ms of mobility penalty. A phone on a desk always reports STATIONARY, so both paths were unobserved and the mobility claim was unfalsifiable. |
+| **J — Payload sweep** | Varies payload size *within* a task type | With one fixed size per task, the transmission term (`payload / bandwidth`) is a per-task constant, perfectly confounded with compute cost. Neither can be attributed. |
+| **K — Edge contention** | 8 synthetic clients saturating the edge | With one phone the executor's 4-slot semaphore never fills and `is_overloaded()` never fires, so every latency figure was measured against an idle server — the best case, not the case adaptive offloading exists for. |
+
+Session K is **contention emulation, not multi-user evaluation.** The synthetic
+clients are processes on the collecting machine, not devices with their own
+radios and mobility. It establishes that the policy responds to server-side
+load; it does not establish that the system scales to N users. Word the thesis
+accordingly — a reviewer will ask.
 
 ## Collection sessions
 

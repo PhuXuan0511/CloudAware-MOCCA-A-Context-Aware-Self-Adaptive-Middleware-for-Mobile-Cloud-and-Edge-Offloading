@@ -57,11 +57,32 @@ class ContextManager(
      */
     var debugBatteryPercent: Int? = null
 
+    /**
+     * Debug-only override for the accelerometer-derived movement state.
+     *
+     * `MobilityCollector` only ever reports STATIONARY for a phone sitting on a
+     * desk, so WALKING and VEHICLE — and therefore the mobility branch of
+     * `OffloadingPolicy.pickRemoteTarget` (EDGE vs CLOUD) and the mobility
+     * penalty in `LatencyEstimator` — were never exercised during collection.
+     * Forcing the state lets a session sweep all three without physically
+     * moving, at the cost of the accelerometer path itself being simulated.
+     * Set to null to restore real sensor readings.
+     */
+    var debugMovementState: MovementState? = null
+
     fun getLatestFeatures(): ContextFeatures {
         val rawSnapshot = collectSnapshot()
-        val snapshot = debugBatteryPercent?.let { pct ->
-            rawSnapshot.copy(battery = rawSnapshot.battery.copy(levelPercent = pct, isCharging = false))
-        } ?: rawSnapshot
+        var snapshot = rawSnapshot
+        debugBatteryPercent?.let { pct ->
+            snapshot = snapshot.copy(
+                battery = snapshot.battery.copy(levelPercent = pct, isCharging = false)
+            )
+        }
+        debugMovementState?.let { state ->
+            snapshot = snapshot.copy(
+                mobility = snapshot.mobility.copy(movementState = state)
+            )
+        }
         historyStore.save(snapshot)
         val features = featureExtractor.extract(snapshot)
         return debugNetworkScore?.let { features.copy(networkScore = it) } ?: features

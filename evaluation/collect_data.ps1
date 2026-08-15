@@ -62,11 +62,27 @@ function Broadcast($action, $extras = "") {
     Invoke-Expression $full | Out-Null
 }
 
-function Run-Task($task, $count, $delayMs = $TASK_DELAY_MS) {
+function Run-Task($task, $count, $delayMs = $TASK_DELAY_MS, $size = 0) {
     $waitSec = [math]::Ceiling($count * $delayMs / 1000) + 6
-    Step "run $task x$count  (waiting ${waitSec}s)"
-    Broadcast $ACTION_RUN "--es task $task --ei count $count --el delay_ms $delayMs"
+    $sizeArg = ""
+    $label   = "$task x$count"
+    if ($size -gt 0) {
+        $sizeArg = "--ei size $size"
+        $label   = "$task x$count (size=$size)"
+    }
+    Step "run $label  (waiting ${waitSec}s)"
+    Broadcast $ACTION_RUN "--es task $task --ei count $count --el delay_ms $delayMs $sizeArg"
     Start-Sleep -Seconds $waitSec
+}
+
+# Forces the accelerometer-derived movement state. MobilityCollector only ever
+# reports STATIONARY for a phone on a desk, so without this the WALKING/VEHICLE
+# branches of pickRemoteTarget and the mobility latency penalty are dead code
+# as far as the collected data is concerned.
+function Set-Movement($state) {
+    Step "movement state -> $state"
+    Broadcast $ACTION_DBG "--es movement_state $state"
+    Start-Sleep -Seconds 2
 }
 
 function Set-ExecMode($mode) {
@@ -491,6 +507,106 @@ Pause-ForUser "Reconnect laptop to normal Wi-Fi, restore original server URLs in
 Ok "Session H done"
 
 # =============================================================================
+# SESSION I - Mobility sweep  (~60 rows)
+#
+# OffloadingPolicy.pickRemoteTarget picks EDGE only when the device is
+# STATIONARY; anything else goes to CLOUD. LatencyEstimator adds up to 200ms of
+# mobility penalty on the same signal. Neither was ever exercised: a phone on a
+# desk always reports STATIONARY, so every previous dataset had mobilityScore
+# pinned at 1.0 and the branch was untestable from the data.
+# =============================================================================
+
+Section "SESSION I - Mobility Sweep  (target: ~60 rows)"
+Write-Host "  Conditions: movement state forced via debug override, ADAPTIVE mode" -ForegroundColor Gray
+Write-Host "  Expected: STATIONARY -> EDGE, WALKING/VEHICLE -> CLOUD + latency penalty" -ForegroundColor Gray
+
+Assert-ServersHealthy
+Set-ExecMode "ADAPTIVE"
+
+foreach ($state in @("STATIONARY", "WALKING", "VEHICLE")) {
+    Set-Movement $state
+    Run-Task "sha256"            4
+    Run-Task "image-grayscale"   4
+    Run-Task "matrix-multiply"   4
+    Run-Task "video-frame-edges" 3 $VIDEO_DELAY_MS
+}
+
+Step "restoring real accelerometer readings"
+Broadcast $ACTION_DBG "--es movement_state NONE"
+Start-Sleep -Seconds 2
+Ok "Session I done"
+
+# =============================================================================
+# SESSION J - Payload size sweep  (~72 rows)
+#
+# Each task previously had exactly one payload size, so the transmission term of
+# the remote cost (payload / bandwidth) was a per-task constant and its
+# contribution could not be separated from the task's compute cost. Sweeping
+# size within a task type makes that term vary independently of complexity.
+# =============================================================================
+
+Section "SESSION J - Payload Size Sweep  (target: ~72 rows)"
+Write-Host "  Conditions: same task type at varying payload sizes, ADAPTIVE mode" -ForegroundColor Gray
+
+Assert-ServersHealthy
+
+# sha256: 1 KB -> 1 MB. Compute is near-constant, so any latency change is transmission.
+foreach ($bytes in @(1024, 16384, 262144, 1048576)) {
+    Run-Task "sha256" 5 $TASK_DELAY_MS $bytes
+}
+
+# image-grayscale: 128px -> 1024px. Both payload and compute scale with area.
+foreach ($side in @(128, 256, 512, 1024)) {
+    Run-Task "image-grayscale" 5 $TASK_DELAY_MS $side
+}
+
+# matrix-multiply: n=16 -> n=96. Payload grows n^2, compute grows n^3 - the
+# case where offloading should win most clearly at the top end.
+foreach ($n in @(16, 32, 64, 96)) {
+    Run-Task "matrix-multiply" 5 $TASK_DELAY_MS $n
+}
+
+Ok "Session J done"
+
+# =============================================================================
+# SESSION K - Edge under contention  (~45 rows)
+#
+# Emulates other tenants. With one phone the edge executor's 4-slot semaphore
+# never fills, /queue always reads 0, and is_overloaded() never fires - so every
+# latency number so far was measured against an idle server, which is the best
+# case rather than the case adaptive offloading exists for.
+#
+# This is contention EMULATION, not multi-user evaluation: the synthetic clients
+# are processes on this machine, not devices with their own radios. It shows the
+# policy reacts to server-side load; it does not show the system scales to N users.
+# =============================================================================
+
+Section "SESSION K - Edge Under Contention  (target: ~45 rows)"
+Write-Host "  Conditions: 8 synthetic clients saturating the edge, ADAPTIVE mode" -ForegroundColor Gray
+Write-Host "  Expected: edge queue grows, some tasks forwarded to cloud (executed_at=cloud)" -ForegroundColor Gray
+
+Assert-ServersHealthy
+Set-ExecMode "ADAPTIVE"
+
+$python = if (Test-Path ".venv-dev\Scripts\python.exe") { ".venv-dev\Scripts\python.exe" } else { "python" }
+Step "starting background load (8 clients, 180s)"
+$load = Start-Process -FilePath $python `
+    -ArgumentList "evaluation/edge_load_generator.py","--clients","8","--duration","180" `
+    -PassThru -NoNewWindow
+
+Start-Sleep -Seconds 10   # let the queue build before measuring
+
+Run-Task "sha256"            8
+Run-Task "image-grayscale"   8
+Run-Task "matrix-multiply"   8
+Run-Task "video-frame-edges" 5 $VIDEO_DELAY_MS
+
+Step "waiting for the load generator to finish"
+try { $load | Wait-Process -Timeout 120 -ErrorAction Stop } catch { $load | Stop-Process -Force }
+Start-Sleep -Seconds 5
+Ok "Session K done"
+
+# =============================================================================
 # RESTORE + PULL
 # =============================================================================
 
@@ -526,7 +642,9 @@ $REQUIRED = @(
     'result_bytes','error','rule','battery_percent','is_charging','network_type',
     'network_score','rtt_ms','bandwidth_mbps','cpu_percent','is_stable',
     'est_local_ms','est_remote_ms','est_local_energy_mj','est_remote_energy_mj',
-    'speedup','executed_at','server_exec_ms','debug_overrides','reasoning'
+    'speedup','executed_at','server_exec_ms',
+    'measured_power_mw','measured_energy_mj','input_size_bytes',
+    'debug_overrides','reasoning'
 )
 # Note: do NOT wrap this in @(...) - PSObject on an array reflects the array's
 # own members (Count, Length, ...), not the row's columns.
@@ -618,6 +736,37 @@ Write-Host ("  Tasks with both adaptive and baseline rows: {0}/5" -f $overlap.Co
 if ($overlap.Count -lt 4) {
     Warn "Regret analysis needs the same tasks measured under baseline and adaptive modes"
 }
+
+# Coverage of the dimensions Sessions I / J / K exist to create.
+Write-Host ""
+Write-Host "  Coverage of the new evaluation dimensions:" -ForegroundColor White
+
+$mobilityStates = @($rows | Select-Object -ExpandProperty is_stable -Unique)
+$mobOk = $mobilityStates.Count -ge 2
+Write-Host ("    {0}  mobility: {1} distinct is_stable value(s)" -f `
+    $(if ($mobOk) { "OK " } else { "LOW" }), $mobilityStates.Count) `
+    -ForegroundColor $(if ($mobOk) { "Green" } else { "Red" })
+if (-not $mobOk) { Warn "Session I did not vary movement state - the mobility branch is unobserved" }
+
+$powerRows = @($rows | Where-Object { $_.measured_energy_mj -ne "" }).Count
+$powerPct = [math]::Round(100 * $powerRows / [math]::Max($totalRows, 1))
+$pwClr = if ($powerPct -ge 50) { "Green" } elseif ($powerPct -gt 0) { "Yellow" } else { "Red" }
+Write-Host ("    {0}  measured energy: {1}/{2} rows ({3}%)" -f `
+    $(if ($powerPct -gt 0) { "OK " } else { "N/A" }), $powerRows, $totalRows, $powerPct) `
+    -ForegroundColor $pwClr
+if ($powerPct -eq 0) {
+    Warn "This device does not expose BATTERY_PROPERTY_CURRENT_NOW."
+    Warn "The energy model cannot be validated - report it as unvalidated, do not"
+    Warn "present modelled energy as if it were measured."
+}
+
+$sizeVariety = @($rows | Group-Object task_name | Where-Object {
+    ($_.Group | Select-Object -ExpandProperty input_size_bytes -Unique).Count -gt 1
+}).Count
+$szClr = if ($sizeVariety -ge 3) { "Green" } else { "Yellow" }
+Write-Host ("    {0}  payload sweep: {1} task type(s) with >1 size" -f `
+    $(if ($sizeVariety -ge 3) { "OK " } else { "LOW" }), $sizeVariety) -ForegroundColor $szClr
+if ($sizeVariety -lt 3) { Warn "Session J did not vary payload size - transmission cost stays confounded with compute" }
 
 Write-Host ""
 $underRep = $dist | Where-Object { $minCounts[$_.Name] -and $_.Count -lt $minCounts[$_.Name] }

@@ -31,3 +31,13 @@ Thumbs.db
 # Editor / tooling
 .claude/
 .vscode/
+
+# Local dev virtualenv for the Python test suite.
+.venv-dev/
+
+# Synthetic test fixture. Regenerate with:
+#   python evaluation/make_synthetic_data.py
+# Deliberately never committed: a fabricated dataset living in version control
+# is one rename away from being mistaken for collected data. The generator is
+# versioned and deterministic, so the file is reproducible without storing it.
+evaluation/data/synthetic-training.csv

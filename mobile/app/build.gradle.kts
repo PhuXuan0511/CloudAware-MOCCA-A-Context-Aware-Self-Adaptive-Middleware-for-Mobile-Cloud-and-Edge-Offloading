@@ -29,6 +29,14 @@ android {
     kotlinOptions {
         jvmTarget = "17"
     }
+
+    testOptions {
+        unitTests {
+            // android.util.Log is a stub that throws "not mocked" by default;
+            // ExecutionProxy logs on every path, so tests need it to no-op.
+            isReturnDefaultValues = true
+        }
+    }
 }
 
 dependencies {
@@ -50,10 +58,17 @@ dependencies {
     // Location
     implementation("com.google.android.gms:play-services-location:21.2.0")
 
-    // TFLite (DRL model inference)
-    implementation("org.tensorflow:tensorflow-lite:2.16.1")
+    // NOTE: tensorflow-lite was removed — the RF model is a plain JSON forest
+    // walked by RandomForestModel.kt (see PHASE2_4_ON_DEVICE_DEPLOYMENT.md,
+    // "Why a manual port"). The dependency was never imported anywhere and cost
+    // ~3 MB of APK.
 
     // Unit testing
     testImplementation("junit:junit:4.13.2")
     testImplementation("io.mockk:mockk:1.13.10")
+    testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.8.0")
+    // Real org.json on the JVM. The android.jar used for unit tests ships stubs
+    // that throw "not mocked", so RandomForestModel.fromJson would be untestable
+    // without this.
+    testImplementation("org.json:json:20240303")
 }

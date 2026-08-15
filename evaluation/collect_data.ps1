@@ -151,6 +151,31 @@ Ok "Containers: $($containers -join ', ')"
 
 Assert-ServersHealthy
 
+# The edge forwards to the cloud when it considers itself overloaded. Since the
+# monitor became cgroup-aware this reflects the container's own budget, but a
+# genuinely loaded edge still forwards - and that would silently turn every EDGE
+# decision into a cloud run. Check before committing to a 45-minute session.
+Step "checking edge is not already overloaded"
+try {
+    $edgeStatus = Invoke-RestMethod "http://localhost:8001/api/v1/status" -TimeoutSec 5
+    Write-Host ("    cpu {0}% / mem {1}%   (source: cpu={2}, memory={3})" -f `
+        $edgeStatus.cpu_percent, $edgeStatus.memory_used_percent, `
+        $edgeStatus.metrics_source.cpu, $edgeStatus.metrics_source.memory) -ForegroundColor Gray
+    if ($edgeStatus.metrics_source.memory -eq "psutil") {
+        Warn "Edge has no memory cgroup limit - it is reading HOST memory."
+        Warn "Set a limit in docker/docker-compose.yml (mem_limit: 2g) or raise"
+        Warn "MOCCA_OVERLOAD_MEM_PERCENT, or EDGE rows will really be cloud runs."
+    }
+    if ($edgeStatus.overloaded) {
+        Warn "Edge reports OVERLOADED - it will forward every task to the cloud."
+        Pause-ForUser "Free resources (or raise MOCCA_OVERLOAD_MEM_PERCENT), then press Enter."
+    } else {
+        Ok "Edge has headroom - EDGE decisions will execute on the edge"
+    }
+} catch {
+    Warn "Could not read edge status: $($_.Exception.Message)"
+}
+
 Step "launching app so ContextService starts"
 adb shell am start -n "$PKG/.MainActivity" | Out-Null
 Start-Sleep -Seconds 4
@@ -407,25 +432,40 @@ Ok "Saved to $outFile"
 
 Section "VERIFICATION"
 
-$lines     = Get-Content $outFile
-$totalRows = $lines.Length - 1
+# Parse with ConvertFrom-Csv rather than splitting on commas: `reasoning` is free
+# text that is quoted precisely because it contains commas, and a naive split
+# shifts every column after it.
+$rows = Import-Csv $outFile
+$totalRows = $rows.Count
 
-# Count only new-schema rows (21 columns) - old-schema rows lack the rule column
-$newSchemaRows = $lines | Select-Object -Skip 1 | Where-Object { ($_ -split ',').Count -ge 21 }
-$oldSchemaRows = $totalRows - $newSchemaRows.Count
+# Schema guard. MetricsRecorder archives the CSV when the header changes, so a
+# mixed-schema file should no longer be possible - this catches a stale file
+# pulled from a device still running an older build.
+$REQUIRED = @(
+    'timestamp_iso','task_id','task_name','target','fell_back','actual_ms',
+    'result_bytes','error','rule','battery_percent','is_charging','network_type',
+    'network_score','rtt_ms','bandwidth_mbps','cpu_percent','is_stable',
+    'est_local_ms','est_remote_ms','est_local_energy_mj','est_remote_energy_mj',
+    'speedup','executed_at','server_exec_ms','debug_overrides','reasoning'
+)
+# Note: do NOT wrap this in @(...) - PSObject on an array reflects the array's
+# own members (Count, Length, ...), not the row's columns.
+$firstRow = $rows | Select-Object -First 1
+$present  = $firstRow.PSObject.Properties.Name
+$missing  = $REQUIRED | Where-Object { $_ -notin $present }
 
-Write-Host "  Total rows      : $totalRows" -ForegroundColor White
-Write-Host "  Usable (21-col) : $($newSchemaRows.Count)  (target >= 400)" -ForegroundColor $(if ($newSchemaRows.Count -ge 400) { "Green" } else { "Red" })
-if ($oldSchemaRows -gt 0) {
-    Warn "$oldSchemaRows old-schema rows found (no rule column) - filter these out before RF training"
+Write-Host "  Total rows      : $totalRows  (target >= 400)" -ForegroundColor $(if ($totalRows -ge 400) { "Green" } else { "Red" })
+if ($missing) {
+    Warn "CSV is missing columns: $($missing -join ', ')"
+    Warn "This file came from an older build - reinstall the app and re-collect."
+    return
 }
+Ok "Schema matches MetricsCsvFormat.HEADER ($($REQUIRED.Count) columns)"
 
 Write-Host ""
-Write-Host "  Rule distribution (new-schema rows only):" -ForegroundColor White
+Write-Host "  Rule distribution:" -ForegroundColor White
 
-$dist = $newSchemaRows |
-    ForEach-Object { ($_ -split ',')[8].Trim('"') } |
-    Group-Object | Sort-Object Count -Descending
+$dist = $rows | Group-Object rule | Sort-Object Count -Descending
 
 $minCounts = @{
     "OFFLINE"                      = 30
@@ -449,26 +489,59 @@ foreach ($g in $dist) {
 # Task distribution check
 Write-Host ""
 Write-Host "  Task distribution (should be roughly balanced):" -ForegroundColor White
-$tasks = $newSchemaRows | ForEach-Object { ($_ -split ',')[2].Trim('"') } | Group-Object | Sort-Object Count -Descending
+$tasks = $rows | Group-Object task_name | Sort-Object Count -Descending
 foreach ($t in $tasks) {
-    $pct = [math]::Round(100 * $t.Count / [math]::Max($newSchemaRows.Count, 1))
+    $pct = [math]::Round(100 * $t.Count / [math]::Max($totalRows, 1))
     $clr = if ($pct -gt 40) { "Red" } elseif ($pct -gt 30) { "Yellow" } else { "Green" }
     Write-Host ("    {0,-25} {1,4} ({2}%)" -f $t.Name, $t.Count, $pct) -ForegroundColor $clr
 }
 
 # Fallback rate check
 Write-Host ""
-$fallbacks = ($newSchemaRows | Where-Object { ($_ -split ',')[4].Trim('"').ToLower() -eq "true" }).Count
-$fbPct = [math]::Round(100 * $fallbacks / [math]::Max($newSchemaRows.Count, 1))
+$fallbacks = ($rows | Where-Object { $_.fell_back -eq "true" }).Count
+$fbPct = [math]::Round(100 * $fallbacks / [math]::Max($totalRows, 1))
 $fbClr = if ($fbPct -gt 20) { "Red" } elseif ($fbPct -gt 10) { "Yellow" } else { "Green" }
-Write-Host ("  Fallback rate: {0}/{1} ({2}%)" -f $fallbacks, $newSchemaRows.Count, $fbPct) -ForegroundColor $fbClr
+Write-Host ("  Fallback rate: {0}/{1} ({2}%)" -f $fallbacks, $totalRows, $fbPct) -ForegroundColor $fbClr
 if ($fbPct -gt 20) {
     Warn "High fallback rate means servers were unreachable during collection - re-run after fixing connectivity"
 }
 
+# Decision-integrity check: did the tier that ran the task match the chosen one?
+#
+# edge-server forwards to the cloud whenever ResourceMonitor.is_overloaded() is
+# true, and psutil reports the HOST's memory from inside the container - so on a
+# laptop above 80% RAM every EDGE decision silently executes on the CLOUD, with
+# an extra hop. `executed_at` is the server's own account of where it ran.
+Write-Host ""
+$remoteRows = @($rows | Where-Object {
+    $_.target -in @("EDGE", "CLOUD") -and $_.fell_back -ne "true"
+})
+$mismatched = @($remoteRows | Where-Object { $_.target -ne $_.executed_at.ToUpper() })
+$mmPct = [math]::Round(100 * $mismatched.Count / [math]::Max($remoteRows.Count, 1))
+$mmClr = if ($mmPct -gt 5) { "Red" } else { "Green" }
+Write-Host ("  target != executed_at: {0}/{1} ({2}%)" -f $mismatched.Count, $remoteRows.Count, $mmPct) -ForegroundColor $mmClr
+if ($mmPct -gt 5) {
+    Warn "Edge is forwarding to cloud - free host RAM below 80% and re-run"
+    Warn "Otherwise EDGE latency actually measures an edge->cloud relay"
+    $mismatched | Group-Object target, executed_at |
+        ForEach-Object { Write-Host ("    {0,-20} {1,4}" -f $_.Name, $_.Count) -ForegroundColor DarkYellow }
+}
+
+# Baseline / adaptive condition overlap - needed for the regret analysis in
+# notebook section 15, which compares tiers within matched context buckets.
+Write-Host ""
+$adaptiveTasks = @($rows | Where-Object { $_.rule -notlike "FORCED_*" } | Select-Object -ExpandProperty task_name -Unique)
+$baselineTasks = @($rows | Where-Object { $_.rule -like "FORCED_*" }    | Select-Object -ExpandProperty task_name -Unique)
+$overlap = @($adaptiveTasks | Where-Object { $_ -in $baselineTasks })
+$ovClr = if ($overlap.Count -ge 4) { "Green" } else { "Yellow" }
+Write-Host ("  Tasks with both adaptive and baseline rows: {0}/5" -f $overlap.Count) -ForegroundColor $ovClr
+if ($overlap.Count -lt 4) {
+    Warn "Regret analysis needs the same tasks measured under baseline and adaptive modes"
+}
+
 Write-Host ""
 $underRep = $dist | Where-Object { $minCounts[$_.Name] -and $_.Count -lt $minCounts[$_.Name] }
-$allOk    = ($newSchemaRows.Count -ge 400) -and (-not $underRep) -and ($fbPct -le 20)
+$allOk    = ($totalRows -ge 400) -and (-not $underRep) -and ($fbPct -le 20) -and ($mmPct -le 5)
 
 if ($allOk) {
     Write-Host "  All checks passed. Proceed to Phase 2 training notebook." -ForegroundColor Cyan

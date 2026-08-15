@@ -56,10 +56,10 @@ class OffloadingClient(
         .build()
         .create(OffloadApi::class.java)
 
-    suspend fun submitToEdge(task: OffloadableTask): ByteArray = submit(task, Tier.EDGE)
-    suspend fun submitToCloud(task: OffloadableTask): ByteArray = submit(task, Tier.CLOUD)
+    suspend fun submitToEdge(task: OffloadableTask): RemoteResult = submit(task, Tier.EDGE)
+    suspend fun submitToCloud(task: OffloadableTask): RemoteResult = submit(task, Tier.CLOUD)
 
-    private suspend fun submit(task: OffloadableTask, tier: Tier): ByteArray {
+    private suspend fun submit(task: OffloadableTask, tier: Tier): RemoteResult {
         val (baseUrl, reachable) = when (tier) {
             Tier.EDGE -> connectionManager.edgeEndpoint to connectionManager.isEdgeReachable()
             Tier.CLOUD -> connectionManager.cloudEndpoint to connectionManager.isCloudReachable()
@@ -78,7 +78,11 @@ class OffloadingClient(
                     (response.errorMessage ?: "unknown error")
             )
         }
-        return response.resultPayload
+        return RemoteResult(
+            payload = response.resultPayload,
+            executedAt = response.executedAt,
+            serverExecMs = response.executionTimeMs,
+        )
     }
 
     private enum class Tier { EDGE, CLOUD }
@@ -228,6 +232,40 @@ class OffloadingClient(
             NetworkType.FIVE_G -> "5G"
             NetworkType.NONE -> "NONE"
         }
+    }
+}
+
+/**
+ * Outcome of a successful remote submission.
+ *
+ * [executedAt] is the server's own account of which tier ran the work. It can
+ * differ from the tier the phone addressed: `edge-server` forwards to the cloud
+ * whenever its `ResourceMonitor` reports overload, so a request sent to EDGE may
+ * come back `executed_at="cloud"`. Recording it lets the evaluation notebook
+ * check that the policy's chosen target is what actually happened, instead of
+ * assuming it.
+ *
+ * [serverExecMs] is the server-measured handler time. Subtracting it from the
+ * phone's wall-clock gives the network overhead, which is what separates the
+ * two terms of the remote cost model.
+ */
+data class RemoteResult(
+    val payload: ByteArray,
+    val executedAt: String,
+    val serverExecMs: Float,
+) {
+    // ByteArray in a data class compares by reference by default.
+    override fun equals(other: Any?): Boolean =
+        other is RemoteResult &&
+            payload.contentEquals(other.payload) &&
+            executedAt == other.executedAt &&
+            serverExecMs == other.serverExecMs
+
+    override fun hashCode(): Int {
+        var result = payload.contentHashCode()
+        result = 31 * result + executedAt.hashCode()
+        result = 31 * result + serverExecMs.hashCode()
+        return result
     }
 }
 

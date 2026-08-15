@@ -19,6 +19,21 @@ class FeatureExtractor {
         )
     }
 
+    /**
+     * Network score = declared capability × measured link health.
+     *
+     * The capability term (type, signal, link bandwidth) is what
+     * `ConnectivityManager` reports, and it is *static*: a Wi-Fi link whose
+     * path to the server has gone from 10 ms to 1000 ms still reports the same
+     * transport and the same `linkDownstreamBandwidthKbps`. Scoring on
+     * capability alone put every Wi-Fi row in [0.68, 0.98] regardless of actual
+     * conditions, which made `UNSTABLE_NETWORK` (threshold 0.30) unreachable
+     * and left injected network degradation invisible to the policy.
+     *
+     * [linkHealth] scales that capability by what was actually measured, so the
+     * same formula now spans the full range: healthy Wi-Fi still scores ~0.7+,
+     * while a 500 ms path scores 0 whatever the transport claims.
+     */
     private fun computeNetworkScore(ctx: NetworkContext): Float {
         val typeBase = when (ctx.type) {
             NetworkType.FIVE_G -> 1.0f
@@ -28,7 +43,29 @@ class FeatureExtractor {
         }
         val signalNorm = ctx.signalStrength.coerceIn(0, MAX_SIGNAL_LEVEL) / MAX_SIGNAL_LEVEL.toFloat()
         val bwNorm = (ctx.bandwidthMbps / GREAT_BANDWIDTH_MBPS).coerceIn(0f, 1f)
-        return WEIGHT_TYPE * typeBase + WEIGHT_SIGNAL * signalNorm + WEIGHT_BANDWIDTH * bwNorm
+        val capability =
+            WEIGHT_TYPE * typeBase + WEIGHT_SIGNAL * signalNorm + WEIGHT_BANDWIDTH * bwNorm
+        return capability * linkHealth(ctx.rttMs)
+    }
+
+    /**
+     * Measured degradation factor in [0, 1]: 1 while RTT stays under
+     * [GOOD_RTT_MS], falling linearly to 0 at [BAD_RTT_MS].
+     *
+     * `rttMs <= 0` means no probe has completed yet, and returns 1 — an
+     * unmeasured link is scored exactly as it was before RTT existed, so a
+     * cold start or a device with no reachable endpoint degrades to the old
+     * capability-only behaviour instead of being penalised for missing data.
+     *
+     * [GOOD_RTT_MS] is deliberately well above a healthy LAN round trip so
+     * ordinary Wi-Fi jitter does not push scores across the policy thresholds;
+     * the band between the two constants is what makes a moderately degraded
+     * link distinguishable from a broken one.
+     */
+    private fun linkHealth(rttMs: Float): Float {
+        if (rttMs <= 0f) return 1f
+        val excess = (rttMs - GOOD_RTT_MS) / (BAD_RTT_MS - GOOD_RTT_MS)
+        return 1f - excess.coerceIn(0f, 1f)
     }
 
     private fun computeCpuScore(ctx: CpuContext): Float =
@@ -51,6 +88,15 @@ class FeatureExtractor {
     companion object {
         private const val MAX_SIGNAL_LEVEL = 4
         private const val GREAT_BANDWIDTH_MBPS = 100f
+
+        // ── Measured link-health band ───────────────────────────────────
+        // Below GOOD: no penalty. Above BAD: the link scores zero however good
+        // the transport claims to be. Chosen so the four steps of the network
+        // degradation session land either side of the policy thresholds
+        // (UNSTABLE_NETWORK 0.30, GOOD_BANDWIDTH 0.60) rather than all above
+        // them, and so a healthy but unremarkable Wi-Fi AP is not penalised.
+        private const val GOOD_RTT_MS = 80f
+        private const val BAD_RTT_MS = 500f
 
         private const val WEIGHT_TYPE = 0.4f
         private const val WEIGHT_SIGNAL = 0.3f

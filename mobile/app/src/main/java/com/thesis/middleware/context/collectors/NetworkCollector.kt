@@ -11,11 +11,22 @@ import com.thesis.middleware.context.NetworkContext
 import com.thesis.middleware.context.NetworkType
 
 /**
- * Collects network context: type, bandwidth, and signal strength.
- * RTT is intentionally left at 0 because a real measurement requires an
- * async probe; ContextManager.collect() is synchronous.
+ * Collects network context: type, bandwidth, signal strength, and RTT.
+ *
+ * Everything except RTT comes from `ConnectivityManager`, which describes the
+ * device's *link* rather than the path to the server — `linkDownstreamBandwidthKbps`
+ * is a static per-transport capability estimate and does not move when the path
+ * degrades. RTT is therefore supplied by [rttProvider], backed by a timed
+ * `/health` probe in `ConnectionManager`; see
+ * [com.thesis.middleware.context.NetworkQualityProbe].
+ *
+ * [rttProvider] is a cached read (not a network call) so [collect] stays
+ * synchronous and cheap enough for the 2-second sampling loop.
  */
-class NetworkCollector(private val context: Context) {
+class NetworkCollector(
+    private val context: Context,
+    private val rttProvider: () -> Float = { 0f },
+) {
 
     private val connectivityManager =
         context.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
@@ -35,7 +46,7 @@ class NetworkCollector(private val context: Context) {
 
         return NetworkContext(
             type = type,
-            rttMs = 0f,
+            rttMs = rttProvider(),
             bandwidthMbps = caps.linkDownstreamBandwidthKbps / 1000f,
             signalStrength = signalLevel()
         )

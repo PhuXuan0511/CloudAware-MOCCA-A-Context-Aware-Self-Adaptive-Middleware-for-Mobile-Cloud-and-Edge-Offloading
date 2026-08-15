@@ -40,7 +40,7 @@ $env:ANDROID_HOME = "$env:LOCALAPPDATA\Android\Sdk"
   Out-File -Encoding utf8 mobile/local.properties
 ```
 
-Verify: `cd mobile; ./gradlew :app:testDebugUnitTest` should report 64 passing tests.
+Verify: `cd mobile; ./gradlew :app:testDebugUnitTest` should report 82 passing tests.
 
 ## 3. Start the servers
 
@@ -49,8 +49,21 @@ docker compose -f docker/docker-compose.yml up -d --build
 ```
 
 `--build` is required, not optional. The images install `iproute2` for `tc`, and
-compose grants `NET_ADMIN` — without both, Session C's network degradation fails
-silently and records healthy-network rows labelled as degraded.
+compose grants `NET_ADMIN` — without both, the collection script cannot shape the
+network at all: Session C records healthy-network rows labelled as degraded, and
+the cloud tier measures no further away than the edge.
+
+### Emulated topology — declare this in the thesis
+
+Both servers are containers on this one machine, so "cloud" is not physically
+distant. `collect_data.ps1` installs a persistent one-way delay on the cloud
+container (`-CloudRttMs`, default 80 ms) to stand in for the distance to a
+datacentre, and applies degradation sessions to **both** tiers because a
+degraded access link affects every remote path, not just the near one.
+
+The cloud tier's network cost is therefore a number chosen in the script, not a
+measurement against a real provider. Report it as emulated. Without it, edge and
+cloud latency come out equal and no edge-versus-cloud conclusion is supportable.
 
 Confirm:
 

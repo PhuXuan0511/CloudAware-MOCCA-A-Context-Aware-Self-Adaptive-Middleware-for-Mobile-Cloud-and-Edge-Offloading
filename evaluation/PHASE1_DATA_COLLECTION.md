@@ -146,14 +146,18 @@ Expected: LOW_BATTERY_OFFLOAD fires at <30 %, BALANCED_COST otherwise.
 
 ### Session C — Adaptive, network degradation sweep (60 samples)
 
-For each `delay`/`loss` pair, on the edge container:
+Shaping is applied to **both** containers, not just the edge. A degraded access
+link slows every remote path; shaping only the edge would instead emulate "the
+edge node broke" and push each degraded decision to a still-pristine cloud.
+
+For each `delay`/`loss` pair:
 
 ```
-docker exec docker-edge-server-1 tc qdisc add dev eth0 root \
-    netem delay <DELAY>ms loss <LOSS>%
-# wait 6 seconds for ConnectionManager TTL
+docker exec <edge>  tc qdisc add dev eth0 root netem delay <DELAY>ms loss <LOSS>%
+docker exec <cloud> tc qdisc add dev eth0 root netem delay <DELAY+80>ms loss <LOSS>%
+# wait 10 seconds — the phone re-probes RTT on a 5s TTL and must see the change
 Tap Grayscale × 5, Matrix × 5, Video Edges × 2
-docker exec docker-edge-server-1 tc qdisc del dev eth0 root
+# restore: edge unshaped, cloud back to its 80ms WAN baseline
 ```
 
 Pairs to walk through:
@@ -161,6 +165,20 @@ Pairs to walk through:
 - `300ms / 5%`   → near unstable boundary
 - `500ms / 20%`  → UNSTABLE_NETWORK fires
 - `1000ms / 30%` → guaranteed Rule 2 hit + timeouts
+
+**Why this only works from the measured-RTT build onwards.** `network_score` is
+computed from the transport type, the cellular signal level, and
+`linkDownstreamBandwidthKbps`. None of those move when the *path* degrades — an
+injected second of delay leaves all three identical. Until `NetworkCollector`
+started reading a timed `/health` probe, `rtt_ms` was hardcoded to 0, every
+Wi-Fi row scored in `[0.68, 0.98]` regardless of conditions, and
+`UNSTABLE_NETWORK` (threshold 0.30) was unreachable. This session collected
+healthy-context rows labelled as degraded, and the rule's near-zero row count
+was the symptom.
+
+The score is now `capability × linkHealth(rtt)`, where `linkHealth` is 1 below
+80 ms and falls linearly to 0 at 500 ms — so the four steps above straddle the
+policy thresholds instead of sitting above them.
 
 ### Session D — Adaptive, offline (20 samples)
 

@@ -12,6 +12,7 @@ import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.asSharedFlow
+import java.util.Locale
 import kotlin.math.abs
 
 /**
@@ -178,7 +179,32 @@ class MapeLoop(
         rule = plan.rule,
         reasoning = plan.reasoning,
         signals = plan.signals,
+        debugOverrides = activeDebugOverrides(),
     )
+
+    /**
+     * Semicolon-separated list of the debug overrides in force for this decision,
+     * or `""` when the estimators ran unmodified.
+     *
+     * Recorded per decision because `collect_data.ps1` Session B sets
+     * `remote_energy_mj=50` to guarantee `LOW_BATTERY_OFFLOAD` fires — which
+     * writes a synthetic value into the `est_remote_energy_mj` CSV column for
+     * ~20% of the dataset. Without this marker those rows are indistinguishable
+     * from genuine estimates and would silently corrupt the energy validation in
+     * the evaluation notebook.
+     *
+     * Formatted with [Locale.US] so a comma-decimal device locale cannot inject
+     * a field separator into the CSV.
+     */
+    private fun activeDebugOverrides(): String = buildList<String> {
+        debugSpeedup?.let { add(String.format(Locale.US, "speedup=%.3f", it)) }
+        debugRemoteEnergyMj?.let {
+            add(String.format(Locale.US, "remote_energy_mj=%.1f", it))
+        }
+        contextManager.debugNetworkScore?.let {
+            add(String.format(Locale.US, "network_score=%.3f", it))
+        }
+    }.joinToString(";")
 
     private fun maxScoreDelta(a: ContextFeatures, b: ContextFeatures): Float = maxOf(
         abs(a.networkScore - b.networkScore),
@@ -254,6 +280,14 @@ data class OffloadingDecision(
     val rule: String,
     val reasoning: String,
     val signals: SignalSnapshot,
+    /**
+     * Debug estimator overrides in force when this decision was made, as
+     * `key=value` pairs joined by `;`, or `""` for an unmodified run.
+     *
+     * Rows carrying an override contain synthetic estimator values and must be
+     * excluded from cost-model validation — see [MapeLoop.activeDebugOverrides].
+     */
+    val debugOverrides: String = "",
 )
 
 enum class ExecutionTarget { LOCAL, EDGE, CLOUD }

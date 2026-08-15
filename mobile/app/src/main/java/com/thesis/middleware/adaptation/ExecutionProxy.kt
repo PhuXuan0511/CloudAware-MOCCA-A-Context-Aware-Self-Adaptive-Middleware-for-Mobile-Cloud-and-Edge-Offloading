@@ -76,13 +76,67 @@ class ExecutionProxy(
 
         var fellBack = false
         var errorMessage: String? = null
+        // Where the work provably ran, per the server's own response, and how
+        // long its handler took. Both stay null/`LOCAL_TAG` for local execution.
+        var executedAt: String = LOCAL_TAG
+        var serverExecMs: Float? = null
+
+        fun accept(remote: com.thesis.middleware.communication.RemoteResult): ByteArray {
+            executedAt = remote.executedAt
+            serverExecMs = remote.serverExecMs
+            return remote.payload
+        }
+
+        fun emit(resultSize: Int) {
+            if (!fellBack && decision.target != ExecutionTarget.LOCAL &&
+                errorMessage == null &&
+                !executedAt.equals(decision.target.name, ignoreCase = true)
+            ) {
+                // Edge forwards to cloud under overload, so the tier that ran the
+                // task can differ from the one the policy picked. Surfaced here and
+                // in the CSV so the evaluation does not silently attribute a
+                // cloud-executed run to the edge.
+                Log.i(TAG, "target=${decision.target} but server reported executed_at=$executedAt")
+            }
+            _events.tryEmit(
+                ExecutionEvent(
+                    taskId = task.id,
+                    taskName = task.name,
+                    decision = decision,
+                    actualMs = System.currentTimeMillis() - startMs,
+                    resultSizeBytes = resultSize,
+                    fellBackToLocal = fellBack,
+                    errorMessage = errorMessage,
+                    executedAt = executedAt,
+                    serverExecMs = serverExecMs,
+                )
+            )
+        }
 
         val result: ByteArray = when {
-            // CLOUD_ONLY baseline: no fallback — exception propagates to caller
-            // so the audience can see how fragile a cloud-only design is when
-            // the network goes down.
+            // CLOUD_ONLY baseline: no fallback — the exception still propagates to
+            // the caller so the audience sees how fragile a cloud-only design is,
+            // but the failure is recorded first. Without that, a failed run leaves
+            // no CSV row at all and the baseline looks *more* reliable than it is:
+            // only its successes survive into the dataset.
             mode == ExecutionMode.CLOUD_ONLY -> {
-                withTimeout(remoteTimeoutMs) { offloadingClient.submitToCloud(task) }
+                try {
+                    accept(withTimeout(remoteTimeoutMs) { offloadingClient.submitToCloud(task) })
+                } catch (e: TimeoutCancellationException) {
+                    // TimeoutCancellationException extends CancellationException,
+                    // so it must be caught before the pass-through below.
+                    Log.w(TAG, "cloud-only timed out after ${remoteTimeoutMs}ms — no fallback")
+                    errorMessage = "timeout after ${remoteTimeoutMs}ms"
+                    emit(resultSize = 0)
+                    throw e
+                } catch (e: CancellationException) {
+                    throw e   // parent scope cancelled — not a measurable outcome
+                } catch (e: Exception) {
+                    Log.w(TAG, "cloud-only failed: ${e.message} — no fallback")
+                    errorMessage = "${e.javaClass.simpleName}: ${e.message ?: "unknown"}"
+                    emit(resultSize = 0)
+                    throw e
+                }
             }
             // LOCAL_ONLY baseline: always run on the phone.
             mode == ExecutionMode.LOCAL_ONLY -> task.execute()
@@ -90,17 +144,22 @@ class ExecutionProxy(
             decision.target == ExecutionTarget.LOCAL -> task.execute()
             else -> {
                 try {
-                    withTimeout(remoteTimeoutMs) {
-                        when (decision.target) {
-                            ExecutionTarget.EDGE -> offloadingClient.submitToEdge(task)
-                            ExecutionTarget.CLOUD -> offloadingClient.submitToCloud(task)
-                            ExecutionTarget.LOCAL -> task.execute()
+                    accept(
+                        withTimeout(remoteTimeoutMs) {
+                            when (decision.target) {
+                                ExecutionTarget.EDGE -> offloadingClient.submitToEdge(task)
+                                ExecutionTarget.CLOUD -> offloadingClient.submitToCloud(task)
+                                // Unreachable: the branch above already caught LOCAL.
+                                ExecutionTarget.LOCAL -> error("LOCAL handled above")
+                            }
                         }
-                    }
+                    )
                 } catch (e: TimeoutCancellationException) {
                     Log.w(TAG, "remote ${decision.target} timed out after ${remoteTimeoutMs}ms — running local")
                     fellBack = true
                     errorMessage = "timeout after ${remoteTimeoutMs}ms"
+                    executedAt = LOCAL_TAG
+                    serverExecMs = null
                     task.execute()
                 } catch (e: CancellationException) {
                     throw e
@@ -108,23 +167,14 @@ class ExecutionProxy(
                     Log.w(TAG, "remote ${decision.target} failed: ${e.message} — running local")
                     fellBack = true
                     errorMessage = "${e.javaClass.simpleName}: ${e.message ?: "unknown"}"
+                    executedAt = LOCAL_TAG
+                    serverExecMs = null
                     task.execute()
                 }
             }
         }
 
-        val elapsedMs = System.currentTimeMillis() - startMs
-        _events.tryEmit(
-            ExecutionEvent(
-                taskId = task.id,
-                taskName = task.name,
-                decision = decision,
-                actualMs = elapsedMs,
-                resultSizeBytes = result.size,
-                fellBackToLocal = fellBack,
-                errorMessage = errorMessage,
-            )
-        )
+        emit(resultSize = result.size)
         return result
     }
 
@@ -132,6 +182,9 @@ class ExecutionProxy(
         private const val TAG = "ExecutionProxy"
         private const val DEFAULT_REMOTE_TIMEOUT_MS = 10_000L
         private const val EVENT_BUFFER = 64
+
+        /** `executed_at` value for work that ran on the phone. */
+        const val LOCAL_TAG = "local"
     }
 }
 
@@ -148,4 +201,16 @@ data class ExecutionEvent(
     val resultSizeBytes: Int,
     val fellBackToLocal: Boolean,
     val errorMessage: String?,
+    /**
+     * Tier that actually ran the task, as reported by the server
+     * (`"edge"` / `"cloud"`), or [ExecutionProxy.LOCAL_TAG] for phone-side
+     * execution including fallbacks. Compare against
+     * `decision.target` to detect edge→cloud forwarding under overload.
+     */
+    val executedAt: String = ExecutionProxy.LOCAL_TAG,
+    /**
+     * Server-measured handler time in ms; null when the task ran locally.
+     * `actualMs - serverExecMs` isolates the network overhead.
+     */
+    val serverExecMs: Float? = null,
 )

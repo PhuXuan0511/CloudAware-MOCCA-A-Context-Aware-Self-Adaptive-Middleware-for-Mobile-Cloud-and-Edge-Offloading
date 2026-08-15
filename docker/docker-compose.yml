@@ -7,6 +7,17 @@ services:
       - "8001:8001"
     environment:
       - CLOUD_SERVER_URL=http://cloud-server:8002
+      # Overload thresholds read by ResourceMonitor. Defaults are 85 / 80.
+      # - MOCCA_OVERLOAD_CPU_PERCENT=85
+      # - MOCCA_OVERLOAD_MEM_PERCENT=80
+    # An explicit limit gives the container a real cgroup budget to measure
+    # itself against. Without one, `memory.max` reads "max" and ResourceMonitor
+    # falls back to the HOST's memory — so a laptop above 80% RAM would make the
+    # edge declare itself permanently overloaded and forward every request to the
+    # cloud, while the phone still recorded target=EDGE. Also models a resource-
+    # constrained edge node more honestly than "the whole laptop".
+    mem_limit: 2g
+    cpus: 2.0
     networks:
       - middleware-net
 
@@ -16,6 +27,10 @@ services:
       dockerfile: docker/Dockerfile.cloud
     ports:
       - "8002:8002"
+    # Deliberately more generous than the edge: the cloud is the "unlimited"
+    # tier in this study, and the edge forwards to it under overload.
+    mem_limit: 4g
+    cpus: 4.0
     networks:
       - middleware-net
 

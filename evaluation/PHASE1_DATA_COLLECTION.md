@@ -12,17 +12,41 @@ classifier to learn the offloading policy. Target ≥ 300 rows with all
 
 Pulled to `evaluation/data/training.csv` after collection.
 
-## CSV schema reminder (20 columns)
+## CSV schema reminder (26 columns)
+
+Defined by `MetricsCsvFormat.HEADER` in the Android app — that constant is the
+single source of truth, and `MetricsCsvFormatTest` pins it.
 
 ```
 timestamp_iso, task_id, task_name, target, fell_back, actual_ms, result_bytes, error,
 rule, battery_percent, is_charging, network_type, network_score,
 rtt_ms, bandwidth_mbps, cpu_percent, is_stable,
-est_local_ms, est_remote_ms, speedup, reasoning
+est_local_ms, est_remote_ms, est_local_energy_mj, est_remote_energy_mj,
+speedup, executed_at, server_exec_ms, debug_overrides, reasoning
 ```
 
-`rule` and `target` are the labels for supervised learning.
-The remaining numeric / categorical columns are features.
+`target` is the label for supervised learning; `rule` identifies which policy
+rule produced it. The remaining numeric / categorical columns are features.
+
+Three columns exist purely for evaluation and are **excluded from training**
+(they are only known after the decision was made):
+
+| Column | Why it matters |
+|--------|----------------|
+| `est_local_energy_mj` / `est_remote_energy_mj` | Energy is half of `BALANCED_COST` and gates `LOW_BATTERY_OFFLOAD`. Previously computed and discarded, which made the energy half of the cost model impossible to validate offline. |
+| `executed_at` | The server's own account of which tier ran the task (`edge` / `cloud` / `local`). `edge-server` forwards to the cloud when overloaded, so `target` alone does not tell you where the work ran. |
+| `server_exec_ms` | Server-measured handler time. `actual_ms - server_exec_ms` isolates network overhead from compute. |
+| `debug_overrides` | Which debug overrides were in force, e.g. `remote_energy_mj=50.0`. Session B sets this to force `LOW_BATTERY_OFFLOAD` to fire, which writes a **synthetic** value into `est_remote_energy_mj`. The notebook excludes these rows from cost-model validation; without the marker they are indistinguishable from real estimates. |
+
+### Schema changes
+
+`MetricsRecorder` compares the header of any existing CSV against the current
+schema on startup. If they differ it renames the old file to
+`mocca-metrics-<timestamp>.csv` and starts a fresh one, so a build upgrade can
+never produce a file with mixed column counts.
+
+**A CSV collected before this schema will not load** — the notebook fails fast
+with the list of missing columns rather than silently producing `NaN`s.
 
 ## Coverage targets per rule
 
@@ -179,5 +203,43 @@ with no single rule below its min sample count.
 - [ ] Network scores span < 0.30, 0.30–0.60, ≥ 0.60
 - [ ] Both LOCAL_ONLY and CLOUD_ONLY baseline rows present
 - [ ] No malformed rows (CSV escape errors, missing columns)
+- [ ] Fallback rate ≤ 10 % (`collect_data.ps1` reports it)
+- [ ] `executed_at` matches `target` on ≥ 95 % of remote rows (see below)
+- [ ] Baseline sessions F/G run under **similar conditions** to the adaptive
+      sessions — the regret analysis in notebook section 15 needs at least two
+      tiers observed within the same (task, network, battery, CPU) bucket
 
 Only when this is green: move to Phase 2 training.
+
+## Watch out: the edge forwards to the cloud under overload
+
+`edge-server` forwards a request to the cloud whenever
+`ResourceMonitor.is_overloaded()` is true — CPU > 85 % **or** memory > 80 %.
+
+`ResourceMonitor` reads the container's own cgroup budget
+(`shared/resources/container_metrics.py`), and `docker-compose.yml` sets
+`mem_limit: 2g` / `cpus: 2.0` so that budget exists. Previously it read the
+**host's** memory via psutil, so a laptop above 80 % RAM made the edge declare
+itself permanently overloaded and forward *every* request to the cloud — while
+the phone still recorded `target=EDGE`.
+
+Verify before a run — `metrics_source.memory` must not be `psutil`:
+
+```powershell
+Invoke-RestMethod http://localhost:8001/api/v1/status | ConvertTo-Json
+```
+
+```jsonc
+{
+  "cpu_percent": 3.2,
+  "memory_used_percent": 18.4,      // of the container's 2 GiB, not the laptop
+  "metrics_source": { "cpu": "cgroup", "memory": "cgroup-v2" },
+  "overloaded": false
+}
+```
+
+`collect_data.ps1` checks this in pre-flight and pauses if the edge is already
+overloaded. Notebook section 4 cross-tabulates `target` against `executed_at`
+afterwards. If a large fraction of EDGE rows report `executed_at=cloud`, the
+edge latency numbers are measuring an edge→cloud relay — raise
+`MOCCA_OVERLOAD_MEM_PERCENT` or the `mem_limit`, and re-run those sessions.

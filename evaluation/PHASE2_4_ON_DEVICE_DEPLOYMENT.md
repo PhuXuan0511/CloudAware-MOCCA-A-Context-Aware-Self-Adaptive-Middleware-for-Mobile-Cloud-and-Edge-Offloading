@@ -1,5 +1,10 @@
 # Phase 2.4 — On-Device Random Forest Deployment
 
+> **Status: implemented.** `ADAPTIVE_ML` is selectable in Settings,
+> `RandomForestPolicy` + `RandomForestModel` are in the app, and
+> `assets/rf-model.json` ships with it. This document is now the design record
+> plus the re-deployment procedure for a retrained model.
+
 Goal: Run the trained Random Forest on the phone alongside the existing
 rule-based policy, so the audience can switch between **Adaptive (rules)**
 and **Adaptive (ML)** at runtime in the same Settings screen as the
@@ -96,15 +101,40 @@ For the ML policy, `rule` is set to one of:
 The log's `Why:` line shows the top-3 voted classes and their
 probabilities, e.g. `LOCAL 0.78, EDGE 0.20, CLOUD 0.02`.
 
-## New files (when Phase 2.4 is executed)
+## Files involved
 
 ```
 mobile/app/src/main/
 ├── assets/
-│   └── rf-model.json                          ← copied from evaluation/outputs/
+│   └── rf-model.json                     ← copied from evaluation/outputs/
 └── java/com/thesis/middleware/decision/policy/
-    └── RandomForestPolicy.kt                  ← NEW: JSON loader + tree walker
+    ├── RandomForestModel.kt              ← JSON parser + tree walker (pure Kotlin)
+    └── RandomForestPolicy.kt             ← Android glue: asset load + feature vector
+
+mobile/app/src/test/java/com/thesis/middleware/decision/policy/
+└── RandomForestModelTest.kt              ← runs against the shipped rf-model.json
 ```
+
+`RandomForestModel` is deliberately free of Android dependencies so it can be
+unit-tested on the JVM against the real model file.
+
+## The feature-order contract
+
+The notebook's `engineer()` column order and `RandomForestPolicy.FEATURE_ORDER`
+are two independent lists that must stay identical. If they drift, **nothing
+crashes** — the walker compares `battery_percent` against an `rtt_ms` threshold
+and returns a confident, wrong answer.
+
+Two guards:
+
+1. `RandomForestPolicy.assertFeatureOrder` throws at model-load time if the
+   exported `feature_names` differ from `FEATURE_ORDER`.
+2. `RandomForestModelTest.shipped model feature order matches the on-device
+   extractor` fails the build for the same reason.
+
+**Changing the feature set means updating both `FEATURE_ORDER` (Kotlin) and
+`FEATURE_ORDER` (notebook cell 6), then retraining.** The notebook's section 10
+energy ablation deliberately does *not* export, precisely to avoid breaking this.
 
 ## RandomForestPolicy.kt — class skeleton
 
@@ -166,7 +196,9 @@ class RandomForestPolicy(modelJson: String) {
 }
 ```
 
-(Full implementation deferred until Phase 2.3 model is exported.)
+(Design sketch, kept for the record. The shipped implementation splits this into
+`RandomForestModel` — pure parsing and traversal — and `RandomForestPolicy` —
+Android asset loading and feature extraction. See those files for the real code.)
 
 ## ExecutionMode update (when Phase 2.4 is executed)
 
@@ -206,37 +238,48 @@ If they diverge on edge cases: useful discussion point in the thesis
 ("ML found a pattern rules miss" or "rules encode safety constraints
 the data didn't capture").
 
+## Re-deploying a retrained model
+
+```powershell
+# 1. Train (notebook writes evaluation/outputs/rf-model.json)
+# 2. Copy into the app
+Copy-Item evaluation/outputs/rf-model.json mobile/app/src/main/assets/rf-model.json
+
+# 3. The feature-order contract is checked by the test suite, not by eye
+cd mobile; ./gradlew :app:testDebugUnitTest
+```
+
+If `RandomForestModelTest` fails on feature order, the model and the extractor
+disagree — fix that before installing, or the ML mode will predict from the
+wrong columns.
+
 ## Verification checklist (post-deployment)
 
-- [ ] `assets/rf-model.json` size < 100 KB (sanity)
+- [x] `assets/rf-model.json` size < 100 KB — asserted by `RandomForestModelTest`
+- [x] Log entry for ML decisions carries `rule = ML_PREDICTED_*`
+- [x] `Adaptive — ML` mode renders a "Why:" line with per-class vote shares
 - [ ] App cold-start time not noticeably worse (model parse < 200 ms)
-- [ ] `Adaptive — ML` mode renders the new "Why:" line with class probs
 - [ ] At least one demo scenario shows ML and rules agreeing
 - [ ] At least one demo scenario where ML can be inspected for divergence
-- [ ] Log entry for ML decisions carries `rule = ML_PREDICTED_*`
-- [ ] CSV `rule` column contains both rule-based ids and ML_PREDICTED_*
+- [ ] CSV `rule` column contains both rule-based ids and `ML_PREDICTED_*`
       for offline post-analysis
 
-## Effort estimate
+## Why the integration was cheap
 
-| Step | Estimated time |
-|------|----------------|
-| Implement `RandomForestPolicy.kt` (loader + walker) | ~1.5 h |
-| Update `ExecutionMode` + Settings UI radio | ~30 min |
-| Branch `ExecutionProxy` to pick policy | ~15 min |
-| Wire `MiddlewareApp` to load model + construct policy | ~15 min |
-| Update MainActivity rule display names for `ML_PREDICTED_*` | ~15 min |
-| End-to-end smoke test | ~30 min |
-| **Total** | **~3 h** |
+The existing `ExecutionMode` switcher, log rendering, and CSV pipeline already
+accept any `OffloadingPlan` shape, so `RandomForestPolicy` is a drop-in
+alternative to `OffloadingPolicy` — no changes to the UI, the recorder, or the
+proxy's control flow beyond one extra branch.
 
-Cheaper than expected because the existing `ExecutionMode` switcher,
-log rendering, and CSV pipeline already accept any `OffloadingPlan`
-shape — RandomForestPolicy is a drop-in alternative.
+## When to ship a retrained model
 
-## When to execute Phase 2.4
+Only **after** the notebook produces a model with **test accuracy ≥ 0.85**,
+judged against the majority-class floor the notebook also prints. A model that
+scores 0.85 where the majority class is already 0.83 has learned almost nothing.
 
-Only **after** the notebook in Phase 2.3 has produced a model with
-**test accuracy ≥ 0.85**. Lower than that is not worth deploying — the
-ML mode would underperform the rule-based one and weaken the thesis
-narrative. If accuracy is low, return to Phase 1 (collect more / better
-data) before attempting deployment.
+Note the deeper caveat, which belongs in the thesis: this accuracy measures how
+well the RF **imitates the rule engine**, not whether either policy makes good
+decisions. The labels are generated by the rules, so a perfect score means
+perfect imitation of a policy that might itself be wrong. Notebook section 15
+estimates regret against a matched-condition oracle — that is the number to cite
+when arguing the system makes *good* decisions rather than *consistent* ones.

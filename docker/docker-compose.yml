@@ -18,6 +18,11 @@ services:
     # constrained edge node more honestly than "the whole laptop".
     mem_limit: 2g
     cpus: 2.0
+    # Required for `tc qdisc add ... netem` in collect_data.ps1 Session C.
+    # Without it tc is denied with "Operation not permitted" and the network
+    # degradation session silently records normal-network rows.
+    cap_add:
+      - NET_ADMIN
     networks:
       - middleware-net
 
@@ -31,6 +36,8 @@ services:
     # tier in this study, and the edge forwards to it under overload.
     mem_limit: 4g
     cpus: 4.0
+    cap_add:
+      - NET_ADMIN
     networks:
       - middleware-net
 

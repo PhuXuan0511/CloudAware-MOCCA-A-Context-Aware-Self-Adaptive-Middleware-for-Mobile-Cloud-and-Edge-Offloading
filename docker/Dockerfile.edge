@@ -2,6 +2,16 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
+# iproute2 provides `tc`, which evaluation/collect_data.ps1 Session C uses to
+# inject latency and packet loss (`tc qdisc add ... netem delay X loss Y`).
+# python:3.11-slim does not ship it, so without this the netem commands failed
+# with "executable file not found" and the whole network-degradation session
+# silently collected rows under normal conditions instead of degraded ones.
+# The container also needs NET_ADMIN — granted in docker-compose.yml.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends iproute2 \
+    && rm -rf /var/lib/apt/lists/*
+
 COPY shared/ ./shared/
 COPY edge-server/ ./edge_server/
 COPY edge-server/requirements.txt .

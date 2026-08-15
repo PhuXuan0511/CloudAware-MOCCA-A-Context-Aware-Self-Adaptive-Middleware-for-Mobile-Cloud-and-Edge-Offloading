@@ -1,5 +1,6 @@
 package com.thesis.middleware.decision
 
+import android.util.Log
 import com.thesis.middleware.adaptation.OffloadableTask
 import com.thesis.middleware.context.ContextFeatures
 import com.thesis.middleware.context.ContextManager
@@ -134,17 +135,48 @@ class MapeLoop(
     }
 
     /**
-     * MAPE loop variant for [ExecutionMode.ADAPTIVE_ML]: runs the full
-     * Monitor+Analyze pipeline but replaces the rule-based Plan step with
-     * [RandomForestPolicy] inference. Falls back to the rule-based policy
-     * if the RF model has not been loaded yet.
+     * MAPE variant for `ExecutionMode.ADAPTIVE_ML`: identical Monitor+Analyze,
+     * with the rule-based Plan step replaced by [RandomForestPolicy] inference.
+     *
+     * Suspending and dispatched exactly like [decide] so the two modes do the
+     * same amount of work on the same dispatcher — otherwise a latency
+     * comparison between them measures the plumbing rather than the policies.
      */
-    fun runMapeWithMl(task: OffloadableTask): OffloadingDecision {
+    suspend fun decideWithMl(task: OffloadableTask): OffloadingDecision =
+        withContext(Dispatchers.Default) { runMapeWithMl(task) }
+
+    private fun runMapeWithMl(task: OffloadableTask): OffloadingDecision {
         val features = contextManager.getLatestFeatures()
         val rawAnalysis = analyze(task, features)
         val analysis = applyDebugOverrides(rawAnalysis)
-        val plan = rfPolicy?.evaluate(analysis) ?: policy.evaluate(analysis)
+        val plan = planWithMl(analysis)
         return execute(plan)
+    }
+
+    /**
+     * RF inference, degrading to the rule engine rather than propagating.
+     *
+     * [RandomForestPolicy] validates the model's feature order on first use and
+     * throws if it has drifted from the extractor. Letting that escape would
+     * abort the task with no telemetry row at all; falling back keeps the run
+     * usable and makes the failure visible in the CSV as a distinct rule id
+     * instead of silently looking like a normal rule-based decision.
+     */
+    private fun planWithMl(analysis: TaskAnalysis): OffloadingPlan {
+        val rf = rfPolicy ?: return policy.evaluate(analysis).copy(
+            rule = ML_UNAVAILABLE_RULE,
+            reasoning = "RF model not loaded — fell back to the rule engine",
+        )
+        return try {
+            rf.evaluate(analysis)
+        } catch (e: Exception) {
+            Log.w(TAG, "RF inference failed, falling back to rules: ${e.message}")
+            policy.evaluate(analysis).copy(
+                rule = ML_UNAVAILABLE_RULE,
+                reasoning = "RF inference failed (${e.javaClass.simpleName}: ${e.message}) " +
+                    "— fell back to the rule engine",
+            )
+        }
     }
 
     private fun applyDebugOverrides(a: TaskAnalysis): TaskAnalysis {
@@ -219,9 +251,18 @@ class MapeLoop(
     )
 
     companion object {
+        private const val TAG = "MapeLoop"
         private const val DEFAULT_DRIFT_INTERVAL_MS = 3_000L
         private const val DEFAULT_DRIFT_WINDOW_MS = 5_000L
         private const val DEFAULT_DRIFT_THRESHOLD = 0.2f
+
+        /**
+         * Rule id written when ADAPTIVE_ML could not use the model and fell back
+         * to the rule engine. Distinct from both the `ML_PREDICTED_*` ids and the
+         * plain rule ids so the notebook can separate "ML decided this" from
+         * "ML was supposed to decide this but couldn't".
+         */
+        const val ML_UNAVAILABLE_RULE = "ML_UNAVAILABLE_FELLBACK_TO_RULES"
     }
 }
 

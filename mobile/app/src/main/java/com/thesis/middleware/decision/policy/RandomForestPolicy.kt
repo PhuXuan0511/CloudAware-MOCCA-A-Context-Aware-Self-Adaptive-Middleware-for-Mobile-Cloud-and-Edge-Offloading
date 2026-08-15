@@ -98,20 +98,50 @@ class RandomForestPolicy(context: Context) {
             "rf-model.json feature order ${m.featureNames} does not match " +
                 "RandomForestPolicy.FEATURE_ORDER $FEATURE_ORDER — retrain or update the extractor"
         }
+        assertEncoding(m, "network_rank", NETWORK_RANK)
+        // Note: the export's `task_complexity` is keyed by task *name*
+        // (echo, sha256, ...) while this side keys by complexity *level*, so the
+        // two share no keys and comparing them would pass vacuously. The
+        // notebook exports `complexity_rank` in the level key space for exactly
+        // this check; task-name-to-level agreement is covered separately by
+        // tests/test_task_registry.py.
+        assertEncoding(m, "complexity_rank", TASK_COMPLEXITY_RANK)
     }
 
-    private fun networkRank(type: NetworkType): Float = when (type) {
-        NetworkType.NONE -> 0f
-        NetworkType.LTE -> 1f
-        NetworkType.WIFI -> 2f
-        NetworkType.FIVE_G -> 3f
+    /**
+     * Checks a categorical encoding against the exported one.
+     *
+     * This is the failure the feature-order check cannot see: rename WIFI or
+     * renumber the complexity scale in the notebook and `feature_names` is
+     * untouched, so the order assertion passes while every prediction reads a
+     * differently-encoded column. Only keys present in both are compared — the
+     * export carries aliases (`5G` alongside `FIVE_G`) that the enum has no
+     * counterpart for.
+     */
+    private fun assertEncoding(
+        m: RandomForestModel,
+        key: String,
+        onDevice: Map<String, Int>,
+    ) {
+        val exported = m.encodings[key] ?: return
+        val disagreements = onDevice.filter { (name, rank) ->
+            exported[name]?.let { it != rank } == true
+        }
+        check(disagreements.isEmpty()) {
+            "rf-model.json '$key' disagrees with the on-device encoding for " +
+                "${disagreements.keys}: exported=${exported.filterKeys { it in disagreements }}, " +
+                "on-device=$disagreements — retrain or update RandomForestPolicy"
+        }
     }
 
-    private fun complexityRank(c: TaskComplexity): Float = when (c) {
-        TaskComplexity.LIGHT -> 0f
-        TaskComplexity.MEDIUM -> 1f
-        TaskComplexity.HEAVY -> 2f
-    }
+    // Read from the maps rather than a `when` so there is exactly one place the
+    // encoding is defined, and assertEncoding can compare that place against
+    // what the notebook exported.
+    private fun networkRank(type: NetworkType): Float =
+        (NETWORK_RANK[type.name] ?: 0).toFloat()
+
+    private fun complexityRank(c: TaskComplexity): Float =
+        (TASK_COMPLEXITY_RANK[c.name] ?: 0).toFloat()
 
     // ── Signals snapshot (mirrors OffloadingPolicy.buildSignalSnapshot) ───────
 
@@ -148,6 +178,30 @@ class RandomForestPolicy(context: Context) {
          * `rf-model.json`; enforced by [assertFeatureOrder] at runtime and by
          * unit test at build time.
          */
+        /**
+         * Ordinal encoding of [NetworkType], keyed by enum name so it can be
+         * compared directly against the notebook's exported `network_rank`.
+         * Must match `NETWORK_RANK` in the training notebook.
+         */
+        val NETWORK_RANK: Map<String, Int> = mapOf(
+            "NONE" to 0,
+            "LTE" to 1,
+            "WIFI" to 2,
+            "FIVE_G" to 3,
+        )
+
+        /**
+         * Ordinal encoding of [TaskComplexity]. The notebook derives the same
+         * values from `task_name` via its `TASK_COMPLEXITY` map, so the two
+         * agree only if the task→complexity assignment in `DemoTasks` and
+         * `shared/tasks/registry.py` also agrees.
+         */
+        val TASK_COMPLEXITY_RANK: Map<String, Int> = mapOf(
+            "LIGHT" to 0,
+            "MEDIUM" to 1,
+            "HEAVY" to 2,
+        )
+
         val FEATURE_ORDER: List<String> = listOf(
             "battery_percent",
             "is_charging",

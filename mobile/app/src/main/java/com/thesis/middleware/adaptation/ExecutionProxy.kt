@@ -66,20 +66,26 @@ class ExecutionProxy(
         // which is what the modelled energy figures currently lack.
         val powerBefore = powerSampler()
         val mode = modeProvider()
-        // Always run MAPE Analyze (estimator + signals) so the log entry has a
-        // populated context snapshot even in baseline modes. The Plan-phase
-        // output (target/rule) is overridden below when mode != ADAPTIVE.
-        val natural = mapeLoop.decide(task)
+        // Run MAPE Monitor+Analyze exactly ONCE per task, whatever the mode, so
+        // every log entry has a populated context snapshot and no mode does more
+        // work than another.
+        //
+        // ADAPTIVE_ML previously ran the whole pipeline twice — once via decide()
+        // and again via the ML path — which collected context twice, wrote two
+        // entries to the drift-detection history per task, and roughly doubled
+        // ML-mode decision latency. That last one would have shown up in the
+        // evaluation as "ML is slower than rules" when it was measuring the
+        // plumbing, not the policies.
         val decision: OffloadingDecision = when (mode) {
-            ExecutionMode.ADAPTIVE    -> natural
-            ExecutionMode.ADAPTIVE_ML -> mapeLoop.runMapeWithMl(task)
-            ExecutionMode.LOCAL_ONLY  -> natural.copy(
+            ExecutionMode.ADAPTIVE    -> mapeLoop.decide(task)
+            ExecutionMode.ADAPTIVE_ML -> mapeLoop.decideWithMl(task)
+            ExecutionMode.LOCAL_ONLY  -> mapeLoop.decide(task).copy(
                 shouldOffload = false,
                 target = ExecutionTarget.LOCAL,
                 rule = "FORCED_LOCAL",
                 reasoning = "execution mode = LOCAL_ONLY — MAPE bypassed for baseline comparison",
             )
-            ExecutionMode.CLOUD_ONLY  -> natural.copy(
+            ExecutionMode.CLOUD_ONLY  -> mapeLoop.decide(task).copy(
                 shouldOffload = true,
                 target = ExecutionTarget.CLOUD,
                 rule = "FORCED_CLOUD",

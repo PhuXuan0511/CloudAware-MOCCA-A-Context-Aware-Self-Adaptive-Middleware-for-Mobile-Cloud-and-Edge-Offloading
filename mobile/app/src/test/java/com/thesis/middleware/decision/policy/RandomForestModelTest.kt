@@ -148,6 +148,47 @@ class RandomForestModelTest {
         assertThrows(IllegalStateException::class.java) { m.predict(floatArrayOf(1f)) }
     }
 
+    // ── Categorical encoding contract ────────────────────────────────────────
+
+    @Test
+    fun `shipped model network encoding matches the on-device encoding`() {
+        // The failure the feature-order check cannot see: rename or renumber a
+        // category and `feature_names` is untouched, so the order assertion
+        // passes while every prediction reads a differently-encoded column.
+        val exported = shipped.encodings["network_rank"]
+            ?: error("rf-model.json has no network_rank map")
+        RandomForestPolicy.NETWORK_RANK.forEach { (name, rank) ->
+            assertEquals("network_rank disagrees for $name", rank, exported[name])
+        }
+    }
+
+    @Test
+    fun `exported encodings are parsed when present`() {
+        val m = RandomForestModel.fromJson(
+            """
+            {
+              "feature_names": ["x"], "classes": ["A"],
+              "network_rank": {"NONE": 0, "WIFI": 2},
+              "complexity_rank": {"LIGHT": 0, "HEAVY": 2},
+              "trees": [{"feature":[-2],"threshold":[-2.0],"left":[-1],"right":[-1],"value":[[1.0]]}]
+            }
+            """.trimIndent()
+        )
+        assertEquals(2, m.encodings["network_rank"]!!["WIFI"])
+        assertEquals(2, m.encodings["complexity_rank"]!!["HEAVY"])
+    }
+
+    @Test
+    fun `a model without encoding maps still loads`() {
+        // Backward compatibility: models exported before complexity_rank existed
+        // must not fail to parse.
+        val m = RandomForestModel.fromJson(
+            """{"feature_names":["x"],"classes":["A"],
+                "trees":[{"feature":[-2],"threshold":[-2.0],"left":[-1],"right":[-1],"value":[[1.0]]}]}"""
+        )
+        assertTrue(m.encodings.isEmpty())
+    }
+
     @Test
     fun `a model with no trees is rejected at parse time`() {
         val empty = """{"feature_names":["x"],"classes":["A"],"trees":[]}"""

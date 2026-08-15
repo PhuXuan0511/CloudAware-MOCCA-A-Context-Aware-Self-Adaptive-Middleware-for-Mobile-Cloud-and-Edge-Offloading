@@ -127,9 +127,20 @@ Roughly 45–60 minutes. Pre-flight verifies server health, edge headroom, and t
 `tc`/netem actually works before committing to the run. Session H pauses twice
 for the mobile-hotspot setup, so stay nearby.
 
-The script ends with a verification report: row count, rule distribution, task
-balance, fallback rate, and `target` vs `executed_at` agreement. Read it — it is
-what tells you whether the run is usable.
+## 7. Check the dataset
+
+Collection always writes `evaluation/data/training.csv`, whatever happened during
+the run — so the CSV existing tells you nothing about whether it is usable. That
+is a separate question, and a separate script:
+
+```powershell
+.\evaluation\verify_dataset.ps1
+```
+
+Reports row count, rule distribution, task balance, fallback rate, `target` vs
+`executed_at` agreement, observed RTT spread, and whether the cloud measured
+further away than the edge. Re-runnable on any CSV via `-Path`, so you can check
+an archived file or re-check after re-collecting a single session.
 
 ## 7. Analyse
 

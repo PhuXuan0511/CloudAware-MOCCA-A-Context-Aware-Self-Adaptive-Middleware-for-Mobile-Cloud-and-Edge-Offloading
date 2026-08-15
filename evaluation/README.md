@@ -12,7 +12,8 @@ evaluation/
 ├── PHASE1_DATA_COLLECTION.md         # how to generate training.csv
 ├── PHASE2_4_ON_DEVICE_DEPLOYMENT.md  # how to ship a retrained model to Android
 ├── README.md                          # this file
-├── collect_data.ps1                   # automated 8-session collection + verification
+├── collect_data.ps1                   # automated 11-session collection
+├── verify_dataset.ps1                 # post-hoc checks on a collected CSV
 ├── data/
 │   └── training.csv                   # produced by collect_data.ps1
 ├── notebooks/
@@ -43,7 +44,10 @@ cd mobile; ./gradlew :app:testDebugUnitTest; cd ..   # policy, estimators, CSV, 
 # 3. Collect data (phone on USB, docker compose up -d)
 .\evaluation\collect_data.ps1
 
-# 4. Analyse
+# 4. Check the dataset is usable — collection writes the CSV either way
+.\evaluation\verify_dataset.ps1
+
+# 5. Analyse
 jupyter notebook evaluation/notebooks/random-forest-training.ipynb
 ```
 

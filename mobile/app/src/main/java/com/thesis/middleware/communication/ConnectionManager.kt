@@ -2,6 +2,7 @@ package com.thesis.middleware.communication
 
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
+import com.thesis.middleware.context.NetworkQualityProbe
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -14,7 +15,10 @@ import java.util.concurrent.TimeUnit
  * Tracks the edge and cloud base URLs and answers "is this tier currently
  * reachable?" for the rest of the middleware.
  *
- *  - Reachability is probed with a short-timeout GET to `<endpoint>/status`.
+ *  - Reachability is probed with a short-timeout GET to `<endpoint>/health`.
+ *  - The probe is *timed*, and the elapsed time is published as [lastRttMs] —
+ *    this is the middleware's only real measurement of the path to the server.
+ *    See [NetworkQualityProbe] for why `ConnectivityManager` cannot supply it.
  *  - Probe results are cached for [reachabilityTtlMs] so concurrent decision
  *    paths don't spam the network. The cache is read outside the [mutex] and
  *    only the refresh path serializes — losers of the race just re-read.
@@ -25,7 +29,7 @@ class ConnectionManager(
     private val httpClient: OkHttpClient = defaultHealthClient(),
     private val connectivityManager: ConnectivityManager? = null,
     private val reachabilityTtlMs: Long = DEFAULT_REACHABILITY_TTL_MS,
-) {
+) : NetworkQualityProbe {
 
     var edgeEndpoint: String = "http://edge-server:8001"
     var cloudEndpoint: String = "http://cloud-server:8002"
@@ -45,8 +49,33 @@ class ConnectionManager(
         else -> edgeEndpoint
     }
 
+    // ── NetworkQualityProbe ───────────────────────────────────────────────────
+
+    /**
+     * Measured against the *edge*, not the cloud: it is the nearer tier, so it
+     * isolates the phone's access link from wide-area distance, and it is the
+     * endpoint whose degradation the evaluation actually shapes.
+     *
+     * TTL-gated like any other reachability read, so driving this from the
+     * context loop adds no traffic beyond one `/health` GET per
+     * [reachabilityTtlMs].
+     */
+    override suspend fun refresh() {
+        runCatching { reachable(Tier.EDGE) }
+    }
+
+    override val lastRttMs: Float get() = edgeProbe.rttMs
+
+    // ── Internals ─────────────────────────────────────────────────────────────
+
     private suspend fun reachable(tier: Tier): Boolean {
-        if (!hasNetwork()) return false
+        if (!hasNetwork()) {
+            // Record the outage rather than leaving the last healthy sample
+            // cached — otherwise a phone that just lost Wi-Fi keeps reporting
+            // the RTT it had while connected, and that value lands in the CSV.
+            mutex.withLock { tier.write(Probe.OFFLINE) }
+            return false
+        }
         val now = System.currentTimeMillis()
         val cached = tier.read()
         if (now - cached.timestamp < reachabilityTtlMs) return cached.reachable
@@ -58,10 +87,20 @@ class ConnectionManager(
 
     private suspend fun probeOnce(endpoint: String): Probe = withContext(Dispatchers.IO) {
         val request = Request.Builder().url("$endpoint/health").get().build()
+        val startNs = System.nanoTime()
         val ok = runCatching {
             httpClient.newCall(request).execute().use { it.isSuccessful }
         }.getOrDefault(false)
-        Probe(reachable = ok, timestamp = System.currentTimeMillis())
+        val elapsedMs = (System.nanoTime() - startNs) / 1_000_000f
+        Probe(
+            reachable = ok,
+            // A failed probe is the strongest available evidence that the link is
+            // bad, so it is published as the timeout rather than dropped. Packet
+            // loss shows up here: with netem loss the GET either takes several
+            // retransmits or never completes, and both raise the reported RTT.
+            rttMs = if (ok) elapsedMs else maxOf(elapsedMs, HEALTH_TIMEOUT_MS.toFloat()),
+            timestamp = System.currentTimeMillis(),
+        )
     }
 
     private fun hasNetwork(): Boolean {
@@ -78,8 +117,22 @@ class ConnectionManager(
     private fun Tier.read(): Probe = if (this == Tier.EDGE) edgeProbe else cloudProbe
     private fun Tier.write(p: Probe) { if (this == Tier.EDGE) edgeProbe = p else cloudProbe = p }
 
-    private data class Probe(val reachable: Boolean, val timestamp: Long) {
-        companion object { val STALE = Probe(reachable = false, timestamp = Long.MIN_VALUE) }
+    private data class Probe(val reachable: Boolean, val rttMs: Float, val timestamp: Long) {
+        companion object {
+            /** Never probed: RTT 0 means "unknown", and consumers fall back to defaults. */
+            val STALE = Probe(reachable = false, rttMs = 0f, timestamp = Long.MIN_VALUE)
+
+            /**
+             * No validated network. Timestamped so it expires like any other
+             * sample, and carries the timeout as its RTT so the scoring path
+             * sees "worst possible link" rather than "unknown".
+             */
+            val OFFLINE get() = Probe(
+                reachable = false,
+                rttMs = HEALTH_TIMEOUT_MS.toFloat(),
+                timestamp = System.currentTimeMillis(),
+            )
+        }
     }
 
     companion object {

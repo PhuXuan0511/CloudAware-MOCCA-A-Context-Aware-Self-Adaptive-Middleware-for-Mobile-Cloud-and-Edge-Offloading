@@ -37,7 +37,14 @@ class MiddlewareApp : Application() {
 
     // ── Context layer ─────────────────────────────────────────────────────
     val contextManager: ContextManager by lazy {
-        ContextManager(context = this, scope = appScope).also { cm ->
+        ContextManager(
+            context = this,
+            scope = appScope,
+            // ConnectionManager already times its /health probe; feeding it in
+            // here is what makes rtt_ms a measurement rather than a constant 0,
+            // and what lets the policy see a degraded link at all.
+            networkProbe = connectionManager,
+        ).also { cm ->
             // Restore any persisted debug overrides so they survive process restarts.
             cm.debugNetworkScore = endpointsRepository.debugNetworkScore
             cm.debugBatteryPercent = endpointsRepository.debugBatteryPercent

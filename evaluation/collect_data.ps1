@@ -16,10 +16,27 @@
 #   FIX-G: Task balance improved - video + sha256 counts raised across all
 #           sessions to fix matrix-multiply domination (66% -> ~25%)
 #   FIX-H: Session H pause message updated for hotspot approach (no ngrok)
+#   FIX-I: Cloud gets a persistent WAN-distance delay. Both containers run on
+#           this laptop, so without it "cloud" is a second process one hop away
+#           and measures *closer* than the edge whenever the edge is shaped -
+#           which inverts the premise the thesis argues.
+#   FIX-J: Network degradation is applied to BOTH tiers. Shaping only the edge
+#           emulates "the edge got worse", not "the phone's access link got
+#           worse", and would push every decision to the cloud for the wrong
+#           reason.
 #
 # Usage:
 #   .\evaluation\collect_data.ps1
+#   .\evaluation\collect_data.ps1 -CloudRttMs 0     # co-located cloud (not advised)
 # =============================================================================
+
+param(
+    # Added one-way delay on the cloud container, in ms, held for the whole run.
+    # Stands in for wide-area distance to a datacentre: edge stays on the LAN,
+    # cloud sits ~80ms away. Report this number in the thesis - it is an
+    # emulated topology, not a measured one. Set to 0 to disable.
+    [int]$CloudRttMs = 80
+)
 
 $PKG            = "com.thesis.middleware"
 $ACTION_RUN     = "$PKG.RUN_TASK"
@@ -32,7 +49,8 @@ $VIDEO_DELAY_MS = 6000
 # Discovered in pre-flight via the compose service label rather than hardcoded:
 # the generated name depends on the compose project and on the v1/v2 separator
 # ("docker_edge-server_1" vs "docker-edge-server-1").
-$EDGE_CONTAINER = $null
+$EDGE_CONTAINER  = $null
+$CLOUD_CONTAINER = $null
 
 # =============================================================================
 # HELPERS
@@ -103,18 +121,21 @@ function Clear-AllDebug {
     Start-Sleep -Seconds 1
 }
 
-# Resolve the edge container by its compose service label, which is stable across
+# Resolve a container by its compose service label, which is stable across
 # compose v1/v2 naming and any project name.
-function Resolve-EdgeContainer {
-    $name = docker ps --filter "label=com.docker.compose.service=edge-server" `
+function Resolve-Container($service, $fallbackPattern) {
+    $name = docker ps --filter "label=com.docker.compose.service=$service" `
                       --format "{{.Names}}" | Select-Object -First 1
     if (-not $name) {
         # Fall back to a name match for containers started outside compose.
         $name = docker ps --format "{{.Names}}" |
-                Where-Object { $_ -match "edge" } | Select-Object -First 1
+                Where-Object { $_ -match $fallbackPattern } | Select-Object -First 1
     }
     return $name
 }
+
+function Resolve-EdgeContainer  { Resolve-Container "edge-server"  "edge" }
+function Resolve-CloudContainer { Resolve-Container "cloud-server" "cloud" }
 
 # Verify tc is usable BEFORE any session depends on it.
 #
@@ -124,19 +145,19 @@ function Resolve-EdgeContainer {
 #   2. "Operation not permitted" - the container lacks NET_ADMIN
 # Either one means Session C records normal-network rows while claiming to have
 # injected 500ms/20% loss, and UNSTABLE_NETWORK barely fires.
-function Assert-NetemUsable {
-    Step "verifying tc/netem works inside $EDGE_CONTAINER"
+function Assert-NetemUsable($container) {
+    Step "verifying tc/netem works inside $container"
 
-    $probe = docker exec $EDGE_CONTAINER tc qdisc show dev eth0 2>&1 | Out-String
+    $probe = docker exec $container tc qdisc show dev eth0 2>&1 | Out-String
     if ($LASTEXITCODE -ne 0 -or $probe -match "not found|executable file") {
-        Warn "tc is not available in the edge container."
+        Warn "tc is not available in $container."
         Warn "The image needs iproute2 - rebuild with:"
         Warn "  docker compose -f docker/docker-compose.yml up -d --build"
         return $false
     }
 
-    $null = docker exec $EDGE_CONTAINER tc qdisc del dev eth0 root 2>&1
-    $add = docker exec $EDGE_CONTAINER tc qdisc add dev eth0 root netem delay 1ms 2>&1 | Out-String
+    $null = docker exec $container tc qdisc del dev eth0 root 2>&1
+    $add = docker exec $container tc qdisc add dev eth0 root netem delay 1ms 2>&1 | Out-String
     if ($LASTEXITCODE -ne 0 -or $add -match "not permitted|Error") {
         Warn "tc exists but cannot modify qdiscs: $($add.Trim())"
         Warn "The container needs NET_ADMIN. docker-compose.yml grants it via cap_add;"
@@ -145,33 +166,58 @@ function Assert-NetemUsable {
         return $false
     }
 
-    $null = docker exec $EDGE_CONTAINER tc qdisc del dev eth0 root 2>&1
-    Ok "tc/netem works - Session C will inject real network degradation"
+    $null = docker exec $container tc qdisc del dev eth0 root 2>&1
+    Ok "tc/netem works in $container"
     return $true
 }
 
-function Set-Netem($delay, $loss) {
-    Step "netem -> delay=${delay}ms loss=${loss}%"
-    $null = docker exec $EDGE_CONTAINER tc qdisc del dev eth0 root 2>&1
-    $out = docker exec $EDGE_CONTAINER tc qdisc add dev eth0 root netem `
-               delay "${delay}ms" loss "${loss}%" 2>&1 | Out-String
+# Applies a qdisc to one container and confirms it took effect, rather than
+# trusting the exit code. `delay 0ms loss 0%` is still a netem qdisc, so the
+# verification below holds for the healthy-baseline case too.
+function Apply-Netem($container, $delay, $loss) {
+    $null = docker exec $container tc qdisc del dev eth0 root 2>&1
+    if ($delay -le 0 -and $loss -le 0) { return $true }
 
-    # Confirm the qdisc is actually in place rather than trusting the exit code.
-    $shown = docker exec $EDGE_CONTAINER tc qdisc show dev eth0 2>&1 | Out-String
+    $out = docker exec $container tc qdisc add dev eth0 root netem `
+               delay "${delay}ms" loss "${loss}%" 2>&1 | Out-String
+    $shown = docker exec $container tc qdisc show dev eth0 2>&1 | Out-String
     if ($shown -notmatch "netem") {
-        Warn "netem did NOT apply: $($out.Trim())"
-        Warn "These rows would be labelled as degraded but collected on a healthy link."
-        Pause-ForUser "Fix netem (see Assert-NetemUsable output above) then press Enter, or Ctrl+C to abort."
-    } else {
-        Write-Host "    active: $($shown.Trim())" -ForegroundColor DarkGray
+        Warn "netem did NOT apply to ${container}: $($out.Trim())"
+        return $false
     }
-    Start-Sleep -Seconds 8   # FIX-D: increased from 6s so NetworkCollector re-probes
+    Write-Host ("    {0,-28} {1}" -f $container, $shown.Trim()) -ForegroundColor DarkGray
+    return $true
 }
 
+# Degrade the phone's ACCESS LINK, which means both tiers.
+#
+# Shaping only the edge would emulate "the edge node got slower" while the cloud
+# stayed pristine - so every degraded row would route to the cloud, and the data
+# would show the policy fleeing the edge under conditions that in reality affect
+# both paths equally. The cloud keeps its baseline WAN delay on top, since
+# distance does not disappear when the access link degrades.
+function Set-Netem($delay, $loss) {
+    Step "netem -> edge: delay=${delay}ms loss=${loss}%   cloud: delay=$($delay + $CloudRttMs)ms loss=${loss}%"
+    $edgeOk  = Apply-Netem $EDGE_CONTAINER  $delay $loss
+    $cloudOk = Apply-Netem $CLOUD_CONTAINER ($delay + $CloudRttMs) $loss
+
+    if (-not ($edgeOk -and $cloudOk)) {
+        Warn "These rows would be labelled as degraded but collected on a healthy link."
+        Pause-ForUser "Fix netem (see the pre-flight output above) then press Enter, or Ctrl+C to abort."
+    }
+    # The phone re-probes RTT on a 5s TTL, so it needs longer than that to see
+    # the new conditions. Rows collected before it does would carry the previous
+    # network score.
+    Start-Sleep -Seconds 10
+}
+
+# Returns to "healthy access link", NOT to "no shaping at all": the cloud keeps
+# its WAN-distance baseline for the whole run.
 function Clear-Netem {
-    Step "removing netem"
-    $null = docker exec $EDGE_CONTAINER tc qdisc del dev eth0 root 2>&1
-    Start-Sleep -Seconds 3
+    Step "restoring healthy link (cloud stays at ${CloudRttMs}ms WAN baseline)"
+    $null = Apply-Netem $EDGE_CONTAINER 0 0
+    $null = Apply-Netem $CLOUD_CONTAINER $CloudRttMs 0
+    Start-Sleep -Seconds 8
 }
 
 function Pause-ForUser($msg) {
@@ -231,20 +277,49 @@ if (-not $EDGE_CONTAINER) {
     Write-Error "Could not identify the edge container. Is docker compose up?"
     exit 1
 }
-Ok "Edge container: $EDGE_CONTAINER"
+$CLOUD_CONTAINER = Resolve-CloudContainer
+if (-not $CLOUD_CONTAINER) {
+    Write-Error "Could not identify the cloud container. Is docker compose up?"
+    exit 1
+}
+Ok "Edge container : $EDGE_CONTAINER"
+Ok "Cloud container: $CLOUD_CONTAINER"
 
 Assert-ServersHealthy
 
 # Session C is worthless if netem cannot be applied, so check now rather than
-# discovering it 20 minutes in.
-$netemOk = Assert-NetemUsable
+# discovering it 20 minutes in. Both tiers are checked because both are shaped.
+$netemOk = (Assert-NetemUsable $EDGE_CONTAINER) -and (Assert-NetemUsable $CLOUD_CONTAINER)
 if (-not $netemOk) {
-    Warn "Session C would collect normal-network rows labelled as degraded."
+    Warn "Session C would collect normal-network rows labelled as degraded,"
+    Warn "and the cloud would measure as close as the edge."
     Pause-ForUser "Rebuild/recreate the containers as described above, then press Enter to re-check."
-    $netemOk = Assert-NetemUsable
+    $netemOk = (Assert-NetemUsable $EDGE_CONTAINER) -and (Assert-NetemUsable $CLOUD_CONTAINER)
     if (-not $netemOk) {
-        Pause-ForUser "netem still unavailable. Press Enter to continue anyway (Session C data will NOT be degraded), or Ctrl+C to abort."
+        Pause-ForUser "netem still unavailable. Press Enter to continue anyway (network conditions will NOT be shaped), or Ctrl+C to abort."
     }
+}
+
+# ── Emulated topology ────────────────────────────────────────────────────────
+# Both servers are containers on this laptop, one hop from the phone. Left as-is,
+# "cloud" is not a distant tier - it is a second local process with a bigger CPU
+# quota, so cloud latency would come out at or below edge latency and the whole
+# edge-versus-cloud argument would invert. A persistent one-way delay on the
+# cloud container stands in for the distance to a datacentre.
+#
+# This is emulation and must be reported as such: the cloud tier's network cost
+# is a number chosen here, not one measured against a real provider.
+if ($netemOk -and $CloudRttMs -gt 0) {
+    Step "installing WAN baseline: cloud +${CloudRttMs}ms one-way, edge unshaped"
+    if (Apply-Netem $CLOUD_CONTAINER $CloudRttMs 0) {
+        Ok "Cloud is now ~${CloudRttMs}ms further away than the edge for the whole run"
+    } else {
+        Warn "Could not shape the cloud - edge and cloud will be indistinguishable"
+    }
+    Start-Sleep -Seconds 5
+} elseif ($CloudRttMs -le 0) {
+    Warn "-CloudRttMs 0: edge and cloud are co-located and will measure the same."
+    Warn "Any edge-vs-cloud latency difference in the results is CPU quota, not distance."
 }
 
 # The edge forwards to the cloud when it considers itself overloaded. Since the
@@ -615,6 +690,11 @@ Set-ExecMode "ADAPTIVE"
 Clear-AllDebug
 Ok "Mode restored to ADAPTIVE, all debug overrides cleared"
 
+Step "removing all network shaping from both containers"
+$null = docker exec $EDGE_CONTAINER  tc qdisc del dev eth0 root 2>&1
+$null = docker exec $CLOUD_CONTAINER tc qdisc del dev eth0 root 2>&1
+Ok "Containers back to an unshaped network"
+
 Section "PULLING CSV"
 $outFile = "evaluation\data\training.csv"
 New-Item -ItemType Directory -Force "evaluation\data" | Out-Null
@@ -758,6 +838,70 @@ if ($powerPct -eq 0) {
     Warn "This device does not expose BATTERY_PROPERTY_CURRENT_NOW."
     Warn "The energy model cannot be validated - report it as unvalidated, do not"
     Warn "present modelled energy as if it were measured."
+}
+
+# Did the phone actually observe the injected degradation?
+#
+# rtt_ms used to be hardcoded 0, which made network_score a constant for a given
+# transport: netem changed the wall clock but the policy never saw it, so
+# UNSTABLE_NETWORK could not fire and every "degraded" row carried the same
+# context as a healthy one. If these two collapse to a single value, the network
+# sessions are decorative and the RF model has two dead feature columns.
+$rttValues   = @($rows | Where-Object { $_.rtt_ms -ne "" } |
+                 ForEach-Object { [double]$_.rtt_ms })
+$distinctRtt = @($rttValues | Select-Object -Unique).Count
+$maxRtt      = if ($rttValues) { ($rttValues | Measure-Object -Maximum).Maximum } else { 0 }
+$rttOk       = ($distinctRtt -ge 3) -and ($maxRtt -ge 200)
+Write-Host ("    {0}  measured RTT: {1} distinct value(s), max {2}ms" -f `
+    $(if ($rttOk) { "OK " } else { "LOW" }), $distinctRtt, [math]::Round($maxRtt)) `
+    -ForegroundColor $(if ($rttOk) { "Green" } else { "Red" })
+if (-not $rttOk) {
+    Warn "The phone did not observe varying RTT. Either netem never applied, or"
+    Warn "the build on the device predates the measured-RTT probe - reinstall the app."
+}
+
+$scoreValues   = @($rows | Where-Object { $_.network_score -ne "" } |
+                   ForEach-Object { [double]$_.network_score })
+$minScore      = if ($scoreValues) { ($scoreValues | Measure-Object -Minimum).Minimum } else { 1 }
+$scoreOk       = $minScore -lt 0.30
+Write-Host ("    {0}  network score reached {1} (needs < 0.30 for UNSTABLE_NETWORK)" -f `
+    $(if ($scoreOk) { "OK " } else { "LOW" }), [math]::Round($minScore, 2)) `
+    -ForegroundColor $(if ($scoreOk) { "Green" } else { "Red" })
+
+# Is the cloud measurably further away than the edge?
+#
+# actual_ms - server_exec_ms isolates network cost from compute, so it is
+# comparable across tiers even with an unbalanced task mix. Both containers run
+# on this laptop, so without the WAN baseline these two come out equal and every
+# edge-vs-cloud claim in the thesis rests on nothing.
+$netOverhead = @($rows |
+    Where-Object { $_.server_exec_ms -ne "" -and $_.fell_back -ne "true" -and $_.error -eq "" } |
+    ForEach-Object {
+        [pscustomobject]@{
+            Tier      = $_.executed_at.ToUpper()
+            OverheadMs = [double]$_.actual_ms - [double]$_.server_exec_ms
+        }
+    })
+if ($netOverhead) {
+    Write-Host "    network overhead by tier (actual_ms - server_exec_ms):" -ForegroundColor Gray
+    $byTier = @{}
+    foreach ($g in ($netOverhead | Group-Object Tier)) {
+        $median = ($g.Group.OverheadMs | Sort-Object)[[int]($g.Count / 2)]
+        $byTier[$g.Name] = $median
+        Write-Host ("      {0,-8} median {1,6}ms  (n={2})" -f `
+            $g.Name, [math]::Round($median), $g.Count) -ForegroundColor Gray
+    }
+    if ($byTier.ContainsKey("EDGE") -and $byTier.ContainsKey("CLOUD")) {
+        $gap = $byTier["CLOUD"] - $byTier["EDGE"]
+        $gapOk = $gap -ge 30
+        Write-Host ("    {0}  cloud is {1}ms further than edge" -f `
+            $(if ($gapOk) { "OK " } else { "LOW" }), [math]::Round($gap)) `
+            -ForegroundColor $(if ($gapOk) { "Green" } else { "Red" })
+        if (-not $gapOk) {
+            Warn "Edge and cloud are not distinguishable by network cost."
+            Warn "Re-run with -CloudRttMs 80 (default) and confirm tc applied to the cloud."
+        }
+    }
 }
 
 $sizeVariety = @($rows | Group-Object task_name | Where-Object {

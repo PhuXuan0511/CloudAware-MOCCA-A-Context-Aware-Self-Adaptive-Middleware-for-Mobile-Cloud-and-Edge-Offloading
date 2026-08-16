@@ -233,9 +233,13 @@ Restore mode after: `Settings → Adaptive → Save`.
 After all sessions:
 
 ```powershell
-adb shell "run-as com.thesis.middleware cat files/mocca-metrics.csv" \
-  > evaluation/data/training.csv
+adb pull /storage/emulated/0/Android/data/com.thesis.middleware/files/mocca-metrics.csv `
+  evaluation/data/training.csv
 ```
+
+Not `run-as com.thesis.middleware cat files/...` — `MetricsRecorder` writes via
+`getExternalFilesDir`, not internal storage, so that command reads the wrong
+directory and silently returns nothing regardless of how the session went.
 
 Sanity-check row count and rule distribution:
 

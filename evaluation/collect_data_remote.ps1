@@ -521,7 +521,12 @@ Section "PULLING CSV"
 $outFile = "evaluation\data\training.csv"
 New-Item -ItemType Directory -Force "evaluation\data" | Out-Null
 Step "adb pull -> $outFile"
-adb shell "run-as $PKG cat files/mocca-metrics.csv" > $outFile
+# MetricsRecorder writes via getExternalFilesDir, not the app's internal
+# storage - `run-as $PKG cat files/...` reads the wrong directory and always
+# returns "No such file or directory", silently producing an empty/missing
+# pull no matter how successful the session was. Confirmed on a real device:
+# the file only ever existed at this external path.
+adb pull "/storage/emulated/0/Android/data/$PKG/files/mocca-metrics.csv" $outFile
 Ok "Saved to $outFile"
 
 Write-Host ""

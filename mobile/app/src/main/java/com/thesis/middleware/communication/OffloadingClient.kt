@@ -197,8 +197,18 @@ class OffloadingClient(
         private val BASE64_SERIALIZER = JsonSerializer<ByteArray> { src, _, _ ->
             JsonPrimitive(Base64.getEncoder().encodeToString(src))
         }
+
+        // getMimeDecoder(), not getDecoder(): confirmed against the real edge
+        // server that its base64 responses arrive with an embedded newline
+        // every 76 characters (RFC 2045 MIME-style wrapping), which the plain
+        // (RFC 4648, no-line-breaks) decoder rejects outright with
+        // "Illegal base64 character a" (hex `a` = 0x0A = the newline itself).
+        // getMimeDecoder() ignores line separators and any other character
+        // outside the base64 alphabet instead of throwing on them, so it
+        // decodes either style correctly. The encoder above is unaffected —
+        // this app's own outbound requests were never the corrupted side.
         private val BASE64_DESERIALIZER = JsonDeserializer<ByteArray> { json, _, _ ->
-            Base64.getDecoder().decode(json.asString)
+            Base64.getMimeDecoder().decode(json.asString)
         }
 
         fun defaultClient(securityManager: SecurityManager): OkHttpClient {

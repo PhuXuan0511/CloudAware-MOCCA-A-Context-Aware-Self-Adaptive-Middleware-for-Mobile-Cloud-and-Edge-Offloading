@@ -98,6 +98,29 @@ class EstimatorsTest {
         assertTrue(latency.estimateRemote(t, offline) > 1e8f)
     }
 
+    @Test
+    fun `offline remote energy is astronomically large but NOT infinite`() {
+        // Regression test: RADIO_IDLE_POWER_MW * waitMs overflows Float32 before
+        // the /1000f divisor ever applies (50f * ~8.5e37 exceeds Float.MAX_VALUE),
+        // silently producing Infinity. Confirmed on a real device: every OFFLINE
+        // row's est_remote_energy_mj was literally `inf`, which crashed the
+        // training notebook's energy-ablation cell (RandomForestClassifier
+        // rejects infinite input). Dividing before multiplying keeps the
+        // sentinel case large-but-finite, matching how est_remote_ms already
+        // behaves for the same offline condition.
+        val offline = Fixtures.features(
+            snapshot = Fixtures.snapshot(
+                networkType = NetworkType.NONE,
+                rttMs = 0f,
+                bandwidthMbps = 0f,
+            )
+        )
+        val t = Fixtures.task(complexity = TaskComplexity.LIGHT, inputSizeBytes = 1_000)
+        val result = energy.estimateRemote(t, offline)
+        assertTrue("expected a large finite value, got $result", result > 1e8f)
+        assertTrue("expected a finite value, got $result", result.isFinite())
+    }
+
     // ── Remote energy: radio TX + radio idle ──────────────────────────────────
 
     @Test

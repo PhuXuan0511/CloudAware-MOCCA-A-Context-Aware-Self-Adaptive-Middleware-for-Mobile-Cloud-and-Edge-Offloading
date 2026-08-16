@@ -143,8 +143,34 @@ def rows():
 
 def test_every_row_is_marked_synthetic(rows):
     assert rows, "generator produced nothing"
-    assert all(r["debug_overrides"].startswith(gen.SYNTHETIC_MARKER) for r in rows)
+    assert all(r["reasoning"].startswith(f"[{gen.SYNTHETIC_MARKER}]") for r in rows)
     assert all(r["task_id"].startswith("synth-") for r in rows)
+
+
+def test_debug_overrides_keeps_its_real_meaning_not_the_provenance_marker(rows):
+    # Regression test for the bug this fix addresses: an earlier version put the
+    # SYNTHETIC marker in debug_overrides on every row. The notebook treats any
+    # non-empty debug_overrides as "estimates were forced, exclude from
+    # cost-model validation" (has_debug_override) - so marking every row there
+    # made `trusted` empty, which emptied every estimator-accuracy table
+    # downstream and crashed the first plot that used it (NaN axis limits).
+    #
+    # Only genuine overrides may be non-empty, and only for the sessions that
+    # generate them.
+    overridden = [r for r in rows if r["debug_overrides"]]
+    assert overridden, "no genuine overrides at all - Session B/I logic broke"
+    assert len(overridden) < len(rows), (
+        "debug_overrides is non-empty on every row again - this is the exact "
+        "regression that emptied `trusted` and broke every downstream estimator "
+        "and energy-validation section in the notebook"
+    )
+    for r in overridden:
+        assert r["debug_overrides"].startswith(("battery=", "movement_state=")), (
+            f"unexpected debug_overrides content: {r['debug_overrides']!r}"
+        )
+    # The vast majority of rows must have NO override - that is what makes them
+    # usable for cost-model validation in the first place.
+    assert len(overridden) / len(rows) < 0.3
 
 
 def test_rows_are_writable_as_the_declared_schema(rows, tmp_path):

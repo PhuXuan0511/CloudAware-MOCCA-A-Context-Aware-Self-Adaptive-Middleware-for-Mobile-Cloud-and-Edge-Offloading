@@ -28,10 +28,21 @@ Three independent markers make that hard to lose track of:
 
   1. the filename is `synthetic-training.csv`, not `training.csv`
   2. every `task_id` is prefixed `synth-`
-  3. every row's `debug_overrides` column begins with `SYNTHETIC`
+  3. every row's `reasoning` column is prefixed `[SYNTHETIC]`
 
 Delete the file once real collection has run. If a number from it ever reaches a
 results table, the markers above are how you will notice.
+
+The provenance marker deliberately does NOT live in `debug_overrides`, even
+though that column would have been a fourth, highly visible place to put it.
+`debug_overrides` has real meaning downstream: the notebook treats any non-empty
+value there as "this row's estimates were forced for a demo, exclude it from
+cost-model validation" (`has_debug_override`). Marking every row would make
+every row look overridden, emptying `trusted` and, with it, every
+estimator-accuracy and energy-validation section — silently, since an empty
+DataFrame does not raise. `debug_overrides` here carries only genuine overrides
+(Session B's forced battery/remote-energy, Session I's forced movement state),
+exactly like a real device would report.
 
 FIDELITY
 --------
@@ -451,8 +462,6 @@ class Generator:
         energy = power * actual_ms / 1000.0
         out_bytes = 0 if error and not fell_back else result_bytes(task, payload, rng)
 
-        marker = SYNTHETIC_MARKER if not overrides else f"{SYNTHETIC_MARKER};{overrides}"
-
         return {
             "timestamp_iso": self._tick(rng.uniform(2.6, 3.9)),
             "task_id": f"synth-{task}-{self.counter:05d}",
@@ -481,8 +490,16 @@ class Generator:
             "measured_power_mw": f"{power:.1f}",
             "measured_energy_mj": f"{energy:.1f}",
             "input_size_bytes": str(payload),
-            "debug_overrides": marker,
-            "reasoning": reasoning,
+            # Real semantics, not a provenance marker: empty except during a
+            # genuine debug override (Session B's battery/remote_energy_mj
+            # forcing, Session I's movement_state). The notebook uses non-empty
+            # debug_overrides to exclude rows from cost-model validation
+            # ("has_debug_override"); stamping every row here — as an earlier
+            # version of this generator did — made every row look overridden,
+            # so `trusted` came out empty and every estimator-accuracy figure
+            # downstream was empty too.
+            "debug_overrides": overrides,
+            "reasoning": f"[{SYNTHETIC_MARKER}] {reasoning}",
         }
 
 
@@ -611,8 +628,8 @@ def main() -> None:
     print("  rule distribution:")
     for rule, n in sorted(dist.items(), key=lambda kv: -kv[1]):
         print(f"    {rule:<32} {n:>4}")
-    print("\n  Every row carries debug_overrides starting 'SYNTHETIC' and a")
-    print("  'synth-' task_id. Delete this file once real collection has run.")
+    print("\n  Every row carries a 'synth-' task_id and a '[SYNTHETIC]' reasoning")
+    print("  prefix. Delete this file once real collection has run.")
 
 
 if __name__ == "__main__":

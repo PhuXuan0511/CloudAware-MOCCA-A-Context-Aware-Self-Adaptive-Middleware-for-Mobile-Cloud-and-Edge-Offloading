@@ -71,4 +71,9 @@ dependencies {
     // that throw "not mocked", so RandomForestModel.fromJson would be untestable
     // without this.
     testImplementation("org.json:json:20240303")
+    // Runs a real local HTTP server so ConnectionManager can be tested against
+    // an actual OkHttp round trip rather than a mocked Call — a mock would not
+    // have caught the Long-overflow bug in Probe.STALE's timestamp, since that
+    // bug lived in real System.currentTimeMillis() arithmetic a mock skips.
+    testImplementation("com.squareup.okhttp3:mockwebserver:4.12.0")
 }

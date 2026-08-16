@@ -50,6 +50,7 @@
                 <action android:name="com.thesis.middleware.SET_MODE" />
                 <action android:name="com.thesis.middleware.SET_DEBUG" />
                 <action android:name="com.thesis.middleware.CLEAR_DEBUG" />
+                <action android:name="com.thesis.middleware.SET_ENDPOINTS" />
             </intent-filter>
         </receiver>
 

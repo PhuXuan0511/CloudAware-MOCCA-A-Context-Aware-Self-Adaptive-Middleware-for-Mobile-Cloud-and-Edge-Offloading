@@ -1,6 +1,8 @@
 """Shared fixtures for the server test suite."""
 from __future__ import annotations
 
+import base64
+
 import pytest
 
 from shared.models.context_data import (
@@ -50,7 +52,11 @@ def make_request(
         task_name=task_name,
         input_size_bytes=len(payload),
         complexity=complexity,
-        input_payload=payload,
+        # input_payload is Base64Bytes: it decodes on direct construction the
+        # same as it does on JSON parsing, so a fixture handing it raw bytes
+        # must pre-encode them - passing `payload` bare would corrupt it the
+        # same way the real bug did.
+        input_payload=base64.b64encode(payload),
         context=make_context(),
     )
 

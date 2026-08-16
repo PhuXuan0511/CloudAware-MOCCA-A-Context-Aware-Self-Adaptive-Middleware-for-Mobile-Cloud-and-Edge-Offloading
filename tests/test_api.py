@@ -6,6 +6,8 @@ HTTP-level tests for the edge and cloud FastAPI apps.
 """
 from __future__ import annotations
 
+import base64
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -58,6 +60,20 @@ def test_cloud_health_identifies_the_node(cloud_client):
 
 
 # ── Offload round-trip ───────────────────────────────────────────────────────
+#
+# "Round trips" means the PAYLOAD survives the trip, not just that the HTTP
+# call succeeded - these tests used to check only status/executed_at/task_id,
+# which is exactly the gap that hid a real bug: OffloadingRequest/Response
+# once declared `input_payload`/`result_payload` as bare `bytes`, and Pydantic
+# v2's bare `bytes` does not base64-decode an incoming JSON string - it just
+# UTF-8-encodes the string itself. Every handler received the base64 TEXT of
+# its input instead of the decoded bytes, and every response sent the same
+# corruption back. Tests that only asserted `success is True` never noticed,
+# because most handlers don't validate their input strictly enough to fail
+# loudly on it (echo and sha256 both "succeed" on garbage; only
+# _matrix_multiply's square-matrix check happened to catch it). Decoding
+# `result_payload` here and comparing it to the real expected value is what
+# actually exercises the JSON <-> bytes boundary this bug lived in.
 
 def test_edge_offload_round_trips_an_echo_task(edge_client):
     payload = make_request(payload=b"hello").model_dump(mode="json")
@@ -67,6 +83,7 @@ def test_edge_offload_round_trips_an_echo_task(edge_client):
     assert body["success"] is True
     assert body["executed_at"] == "edge"
     assert body["task_id"] == "task-1"
+    assert base64.b64decode(body["result_payload"]) == b"hello"
 
 
 def test_cloud_offload_round_trips_an_echo_task(cloud_client):
@@ -76,6 +93,21 @@ def test_cloud_offload_round_trips_an_echo_task(cloud_client):
     body = response.json()
     assert body["success"] is True
     assert body["executed_at"] == "cloud"
+    assert base64.b64decode(body["result_payload"]) == b"hello"
+
+
+def test_edge_offload_hashes_the_decoded_input_not_the_base64_text(edge_client):
+    # echo alone can't prove the INPUT was decoded correctly - a bug that
+    # corrupts input and output symmetrically could still look identity-like.
+    # sha256 only matches if the handler actually hashed the real bytes.
+    import hashlib
+
+    raw = b"the quick brown fox jumps over the lazy dog"
+    payload = make_request(task_name="sha256", payload=raw).model_dump(mode="json")
+    response = edge_client.post("/api/v1/offload", json=payload)
+    body = response.json()
+    assert body["success"] is True
+    assert base64.b64decode(body["result_payload"]) == hashlib.sha256(raw).digest()
 
 
 def test_offload_rejects_a_malformed_request_body(edge_client):
@@ -133,7 +165,9 @@ def test_edge_forwards_to_cloud_when_overloaded(edge_client, monkeypatch):
         return OffloadingResponse(
             task_id=request.task_id,
             success=True,
-            result_payload=b"from-cloud",
+            # Base64Bytes decodes on direct construction too - pre-encode or
+            # this silently corrupts, same as the real bug it guards against.
+            result_payload=base64.b64encode(b"from-cloud"),
             execution_time_ms=1.0,
             executed_at="cloud",
         )

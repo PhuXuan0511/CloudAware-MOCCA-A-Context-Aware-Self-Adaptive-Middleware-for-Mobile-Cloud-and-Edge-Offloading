@@ -22,7 +22,7 @@ class EnergyEstimator {
 
     fun estimateLocal(task: OffloadableTask, features: ContextFeatures): Float {
         val execMs = localExecMs(task, features)
-        return CPU_POWER_MW * execMs / 1000f
+        return CPU_POWER_MW / 1000f * execMs
     }
 
     fun estimateRemote(task: OffloadableTask, features: ContextFeatures): Float {
@@ -34,8 +34,18 @@ class EnergyEstimator {
         val serverExecMs = baselineMs(task.complexity) * SERVER_SPEEDUP
         val waitMs = rtt + serverExecMs + SERVER_QUEUE_MS
 
-        val txEnergyMj = RADIO_TX_POWER_MW * txMs / 1000f
-        val idleEnergyMj = RADIO_IDLE_POWER_MW * waitMs / 1000f
+        // Divide by 1000 BEFORE multiplying by the (possibly huge) time term,
+        // not after. `waitMs` carries NetworkContext's offline sentinel
+        // (Float.MAX_VALUE/4 ~= 8.5e37) when there is no network, and
+        // `RADIO_IDLE_POWER_MW * waitMs` (50f * 8.5e37) overflows Float32
+        // *before* the `/ 1000f` ever applies, silently producing Infinity —
+        // confirmed against a real device's OFFLINE rows, where every
+        // est_remote_energy_mj value was literally `inf`. This reordering is
+        // numerically identical for every normal (non-sentinel) case and
+        // produces a large-but-finite value for the sentinel case, matching
+        // how est_remote_ms already stays finite for the same condition.
+        val txEnergyMj = RADIO_TX_POWER_MW / 1000f * txMs
+        val idleEnergyMj = RADIO_IDLE_POWER_MW / 1000f * waitMs
         return txEnergyMj + idleEnergyMj
     }
 

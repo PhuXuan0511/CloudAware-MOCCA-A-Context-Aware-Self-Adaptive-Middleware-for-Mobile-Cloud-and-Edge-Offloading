@@ -12,25 +12,35 @@ import kotlinx.coroutines.launch
 /**
  * ADB-triggered receiver for automated data collection (Phase 1 RF training).
  *
- * Four actions, all fired via `adb shell am broadcast`:
+ * Five actions, all fired via `adb shell am broadcast`:
  *
  *   RUN_TASK        --es task <name> --ei count <n> --el delay_ms <ms>
  *   SET_MODE        --es mode <ADAPTIVE|LOCAL_ONLY|CLOUD_ONLY>
  *   SET_DEBUG       --ef speedup <f>  --ef network_score <f>  --ef remote_energy_mj <f>
  *   CLEAR_DEBUG     (no extras)
+ *   SET_ENDPOINTS   --es edge_url <url>  --es cloud_url <url>
  *
  * Task names: echo | sha256 | image-grayscale | matrix-multiply | video-frame-edges
  * Use -1 for any SET_DEBUG float to clear that specific override.
+ *
+ * SET_ENDPOINTS exists for collect_data_remote.ps1: when the edge/cloud
+ * servers run on a different machine than the one driving the emulator/phone,
+ * pointing the app at them by hand through SettingsActivity would mean a
+ * manual tap for every fresh install. This mirrors exactly what
+ * SettingsActivity.onSave() does — persist to EndpointsRepository, then
+ * live-mutate the running ConnectionManager so the change takes effect
+ * without restarting the app.
  */
 class AutoRunReceiver : BroadcastReceiver() {
 
     override fun onReceive(context: Context, intent: Intent) {
         val app = context.applicationContext as MiddlewareApp
         when (intent.action) {
-            ACTION_RUN_TASK   -> handleRunTask(context, app, intent)
-            ACTION_SET_MODE   -> handleSetMode(app, intent)
-            ACTION_SET_DEBUG  -> handleSetDebug(app, intent)
-            ACTION_CLEAR_DEBUG -> handleClearDebug(app)
+            ACTION_RUN_TASK      -> handleRunTask(context, app, intent)
+            ACTION_SET_MODE      -> handleSetMode(app, intent)
+            ACTION_SET_DEBUG     -> handleSetDebug(app, intent)
+            ACTION_CLEAR_DEBUG   -> handleClearDebug(app)
+            ACTION_SET_ENDPOINTS -> handleSetEndpoints(app, intent)
         }
     }
 
@@ -96,6 +106,17 @@ class AutoRunReceiver : BroadcastReceiver() {
         }
     }
 
+    private fun handleSetEndpoints(app: MiddlewareApp, intent: Intent) {
+        intent.getStringExtra("edge_url")?.let { url ->
+            app.endpointsRepository.edgeUrl = url
+            app.connectionManager.edgeEndpoint = app.endpointsRepository.edgeUrl
+        }
+        intent.getStringExtra("cloud_url")?.let { url ->
+            app.endpointsRepository.cloudUrl = url
+            app.connectionManager.cloudEndpoint = app.endpointsRepository.cloudUrl
+        }
+    }
+
     private fun handleClearDebug(app: MiddlewareApp) {
         app.endpointsRepository.debugSpeedup = null
         app.endpointsRepository.debugNetworkScore = null
@@ -106,10 +127,11 @@ class AutoRunReceiver : BroadcastReceiver() {
     }
 
     companion object {
-        const val ACTION_RUN_TASK    = "com.thesis.middleware.RUN_TASK"
-        const val ACTION_SET_MODE    = "com.thesis.middleware.SET_MODE"
-        const val ACTION_SET_DEBUG   = "com.thesis.middleware.SET_DEBUG"
-        const val ACTION_CLEAR_DEBUG = "com.thesis.middleware.CLEAR_DEBUG"
+        const val ACTION_RUN_TASK      = "com.thesis.middleware.RUN_TASK"
+        const val ACTION_SET_MODE      = "com.thesis.middleware.SET_MODE"
+        const val ACTION_SET_DEBUG     = "com.thesis.middleware.SET_DEBUG"
+        const val ACTION_CLEAR_DEBUG   = "com.thesis.middleware.CLEAR_DEBUG"
+        const val ACTION_SET_ENDPOINTS = "com.thesis.middleware.SET_ENDPOINTS"
 
         private const val DEFAULT_DELAY_MS = 3000L
         private const val SENTINEL         = -1f

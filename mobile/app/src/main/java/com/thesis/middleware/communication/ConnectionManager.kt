@@ -119,8 +119,21 @@ class ConnectionManager(
 
     private data class Probe(val reachable: Boolean, val rttMs: Float, val timestamp: Long) {
         companion object {
-            /** Never probed: RTT 0 means "unknown", and consumers fall back to defaults. */
-            val STALE = Probe(reachable = false, rttMs = 0f, timestamp = Long.MIN_VALUE)
+            /**
+             * Never probed: RTT 0 means "unknown", and consumers fall back to
+             * defaults.
+             *
+             * Timestamp is 0 (epoch), NOT Long.MIN_VALUE. `now - timestamp` is
+             * how freshness is checked, and `now - Long.MIN_VALUE` overflows a
+             * Long and wraps to a huge *negative* number — which then reads as
+             * "younger than the TTL", so the never-probed sentinel looked
+             * permanently fresh and `probeOnce` was never called: every
+             * reachability check returned this cached `reachable = false`
+             * forever, for the life of the object, regardless of whether the
+             * server was actually reachable. `now - 0` is always a large
+             * positive number, so it correctly reads as maximally stale.
+             */
+            val STALE = Probe(reachable = false, rttMs = 0f, timestamp = 0L)
 
             /**
              * No validated network. Timestamped so it expires like any other

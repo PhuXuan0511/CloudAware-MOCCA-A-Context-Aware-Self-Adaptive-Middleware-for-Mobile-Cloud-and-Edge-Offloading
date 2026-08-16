@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import time
 
 from shared.models.offloading_request import OffloadingRequest, OffloadingResponse
@@ -36,7 +37,12 @@ class TaskExecutor:
             return OffloadingResponse(
                 task_id=request.task_id,
                 success=True,
-                result_payload=result,
+                # result_payload is Base64Bytes, which decodes on construction
+                # as much as on JSON parsing - passing the handler's raw bytes
+                # directly would try to base64-*decode* them (wrong direction)
+                # and usually corrupt to empty. Pre-encoding here is what makes
+                # the round trip symmetric with the client's expectation.
+                result_payload=base64.b64encode(result),
                 execution_time_ms=elapsed_ms,
                 executed_at="edge",
             )

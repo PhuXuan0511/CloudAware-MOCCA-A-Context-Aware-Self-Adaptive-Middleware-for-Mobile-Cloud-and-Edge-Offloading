@@ -76,7 +76,14 @@ function Warn($msg) {
 }
 
 function Broadcast($action, $extras = "") {
-    $full = "adb shell am broadcast -a $action $extras"
+    # Explicit component target, not just -a <action>. Verified on a real
+    # Android 14 device: an implicit broadcast (action only) is silently
+    # dropped before it reaches AutoRunReceiver - "Broadcast completed:
+    # result=0" prints as if it worked, and every task/mode/debug broadcast in
+    # a collection run is a no-op with nothing in the logs to say so. Adding
+    # -n makes delivery unconditional regardless of Android version or OEM
+    # broadcast policy.
+    $full = "adb shell am broadcast -n $PKG/.AutoRunReceiver -a $action $extras"
     Invoke-Expression $full | Out-Null
 }
 

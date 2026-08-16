@@ -18,7 +18,10 @@ import java.util.Locale
  *   /storage/emulated/0/Android/data/com.thesis.middleware/files/mocca-metrics.csv
  *
  * Pull from the host with:
- *   adb shell "run-as com.thesis.middleware cat files/mocca-metrics.csv" > training.csv
+ *   adb pull /storage/emulated/0/Android/data/com.thesis.middleware/files/mocca-metrics.csv training.csv
+ *
+ * Not `run-as ... cat files/...` - that reads the app's *internal* storage,
+ * which this class never writes to, and silently returns nothing.
  *
  * The column layout lives in [MetricsCsvFormat]; this class owns only file
  * handling, timestamping, and schema migration.

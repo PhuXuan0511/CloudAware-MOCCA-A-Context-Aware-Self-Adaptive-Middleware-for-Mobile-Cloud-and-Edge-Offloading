@@ -41,3 +41,15 @@ Thumbs.db
 # is one rename away from being mistaken for collected data. The generator is
 # versioned and deterministic, so the file is reproducible without storing it.
 evaluation/data/synthetic-training.csv
+
+# Intermediate dataset snapshots superseded by training.csv
+evaluation/data/training_667_pre_ml.csv
+evaluation/data/training_with_ml.csv
+evaluation/data/training_with_ml_v2.csv
+
+# Stale dev-era summary (generated from 667-row dataset, no longer valid)
+evaluation/outputs/comparison-summary.md
+
+# Old model backups
+evaluation/outputs/rf-model.OLD-923.json
+mobile/app/src/main/assets/rf-model.OLD-923.json.bak

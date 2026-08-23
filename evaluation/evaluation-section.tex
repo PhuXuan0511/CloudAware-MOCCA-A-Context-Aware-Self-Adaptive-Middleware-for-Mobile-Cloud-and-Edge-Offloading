@@ -1,0 +1,452 @@
+\section{Evaluation}
+\label{sec:evaluation}
+
+This section reports the empirical evaluation of CloudAware-MOCCA using a
+physical Android device and containerized edge and cloud services. The complete
+dataset comprises 2{,}184 end-to-end task executions collected on physical
+hardware over a Wi-Fi network: 1{,}928 from the rule-based and forced-baseline
+sessions (which include a large targeted-mobility augmentation described in
+Section~\ref{sec:decision-quality}), and 256 from a session in which the Random
+Forest served as the live on-device planner.
+
+\textbf{A note on dataset composition.}
+The dataset was expanded beyond the original healthy-usage collection through a
+targeted augmentation that forced the mobility branch (stationary, walking, and
+vehicular states via a debug override) to enrich the under-represented cloud
+class from 22 to 600 observations. This deliberately trades representativeness of
+natural usage for per-class classifier coverage: the cloud share reported below
+(32.5\%) is an artefact of that augmentation rather than the natural routing rate
+of the policy, which is approximately 4\% under stationary conditions. Wherever a
+result depends on the dataset reflecting natural usage, most importantly the
+energy validation and the learned-versus-rules comparison, this dependence is
+stated explicitly.
+
+
+\subsection{Experimental Setup and Data Collection}
+\label{sec:eval-setup}
+
+\textbf{Testbed.}
+Experiments were conducted using a Samsung Galaxy A56 running Android 14 and
+connected over Wi-Fi to two Docker services hosted on a separate machine. The
+edge service was constrained to 2~vCPU and 2~GB of memory, whereas the cloud
+service was allocated 4~vCPU and 4~GB. Because both services were physically one
+network hop from the device, a persistent 80~ms one-way network delay was
+introduced on the cloud service to emulate wide-area communication latency. This
+delay was an experimental control parameter rather than a measurement obtained
+from a public cloud provider.
+
+Five workloads spanning different levels of computational intensity were
+evaluated: echo, SHA-256, grayscale conversion, matrix multiplication, and
+video-frame edge detection. Echo and SHA-256 represent lightweight workloads,
+grayscale conversion an intermediate workload, and matrix multiplication and
+video-frame edge detection computationally intensive workloads. Payload size was
+additionally varied for three workloads.
+
+\textbf{Sessions.}
+Eleven data-collection sessions were conducted under distinct and independently
+verified conditions: a healthy baseline, a battery-discharge sweep, a four-level
+network-degradation sweep applied simultaneously to both remote tiers, an offline
+period, a processor-stress period, forced local-only and cloud-only baselines, a
+mobility sweep, a payload-size sweep, and an edge-contention experiment involving
+eight synthetic clients. Network degradation ranged from 100~ms with no packet
+loss to 1000~ms with 30\% packet loss, while the additional cloud delay remained
+in place. A subsequent targeted-mobility augmentation repeated the healthy,
+mobility, battery, processor-stress, and payload blocks several times to grow the
+dataset to 1{,}844 adaptive rows, principally to populate the cloud class and the
+condition groups used in the regret analysis (Section~\ref{sec:decision-quality}).
+Every dataset row corresponds to an actual task execution against the deployed
+services; the augmentation rows differ only in that their movement state was
+forced, and they carry the same override flag so that they can be excluded from
+cost-model validation.
+
+In addition, a further session executed the Random Forest policy as the live
+on-device planner for 256 tasks (Section~\ref{sec:decision-quality}). Analyses
+specific to the rule engine (Section~\ref{sec:cost-validation} and the
+reliability figures below) are computed on the 1{,}928 rule-based and baseline
+rows so that the learned-policy session does not perturb them, whereas the policy
+comparisons of latency (Section~\ref{sec:system-performance}) and regret
+(Section~\ref{sec:decision-quality}) treat the learned policy as an additional
+policy alongside the rule engine and the two fixed baselines.
+
+Because network degradation was introduced on the remote host, a manipulation
+check was required to confirm that the imposed conditions were reflected in the
+measurements observed by the mobile policy. Figure~\ref{fig:network-score-rtt}
+plots the measured RTT to the edge tier against the corresponding network score,
+excluding offline observations. The relationship is monotonically decreasing on a
+logarithmic scale, and observations classified as unstable network conditions are
+concentrated below the 0.30 decision threshold, confirming that the imposed
+degradation was visible to the mobile policy rather than remaining a server-side
+artefact.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\columnwidth]{network-score-vs-rtt.png}
+\caption{Measured RTT versus computed network score.}
+\label{fig:network-score-rtt}
+\end{figure}
+
+
+\subsection{System Performance: Reliability and Latency}
+\label{sec:system-performance}
+
+The overall fallback rate was \textbf{1.3\% (25/1{,}928)}, but the reliability
+cost is not spread thinly. Every one of the 25 fallbacks (17 video-frame
+edge-detection and 8 matrix-multiplication executions, all large-payload heavy
+tasks) waited out the full client timeout of approximately 10.2~s (median
+10{,}177~ms) before re-executing locally in a median of 35~ms. A fallback
+therefore imposes a multi-second stall on the order of 290 times the local
+execution it ultimately performs, so the aggregate rate understates the tail
+experience, and the failures concentrate on precisely the workload the policy
+should arguably not have offloaded (Section~\ref{sec:cost-validation}).
+Independent server-side overload handling forwarded 18 of 946 remote requests
+(1.9\%) from the edge tier to the cloud tier, recorded separately from direct
+edge execution. The cloud-only baseline, for which local fallback was disabled,
+completed all 40 requests successfully; this indicates that the corresponding
+session did not encounter remote failure and should not be generalized to
+environments with lower network reliability.
+
+\begin{table}[t]
+\centering
+\caption{End-to-end latency by execution policy}
+\label{tab:eval-policy-latency}
+\footnotesize
+\begin{tabular}{lrrrr}
+\toprule
+Policy & $n$ & Mean (ms) & Median (ms) & p95 (ms) \\
+\midrule
+Adaptive rule policy & 1819 & 708.7 & \textbf{61.0} & 6087.2 \\
+Adaptive ML policy & 256 & 646.0 & \textbf{50.0} & 5547.0 \\
+Local-only baseline & 44 & 66.6 & 39.0 & 181.0 \\
+Cloud-only baseline & 40 & 1367.1 & 394.0 & 6852.9 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Figure~\ref{fig:latency-policy} reports latency by execution policy, with mean
+values and 95\% confidence intervals shown alongside p95 latency. Because the
+distributions are strongly right-skewed, median latency is the load-bearing
+statistic. The adaptive policy's value is best read against the two fixed
+baselines: it delivers an approximately sixfold median-latency improvement over
+always-cloud (61~ms versus 394~ms) while remaining within tens of milliseconds of
+the always-local baseline (39~ms) on the light tasks that dominate the median.
+The learned Random Forest policy tracks the rule engine closely (median 50~ms
+versus 61~ms).
+
+The direction of these gaps was confirmed with a percentile bootstrap (10{,}000
+resamples) of the per-task difference in mean latency. The rule-based policy is
+significantly faster than always-cloud on all five tasks, with every 95\%
+confidence interval excluding zero (for example, video-frame edge detection
+$-1668$~ms, CI $[-2435, -954]$). It is, however, significantly \emph{slower} than
+always-local on all five tasks, most starkly for video-frame edge detection
+($+5006$~ms, CI $[+4644, +5364]$), because local execution of that task takes a
+median of only 170~ms whereas offloading its approximately 2.8~MB payload takes
+roughly 5.8~s. For this workload and network, local execution is therefore often
+the latency-optimal choice, and the adaptive policy's contribution is primarily
+to avoid the always-cloud penalty rather than to beat local execution; a clear
+latency win from offloading did not materialize for these tasks at these payload
+sizes.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\columnwidth]{latency-by-policy.png}
+\caption{End-to-end latency by execution policy.}
+\label{fig:latency-policy}
+\end{figure}
+
+
+\subsection{Cost-Model Validation: Latency and Energy Estimation}
+\label{sec:cost-validation}
+
+Estimator predictions were compared with measured wall-clock latency using
+1{,}354 trusted observations after excluding controlled-context and offline
+sentinel records. Correlations across the three execution tiers ranged from 0.62
+to 0.73, and remote estimates systematically underestimated observed latency by
+approximately 360 to 870~ms. The estimator therefore captures relative
+performance tendencies but is not yet calibrated for accurate absolute
+prediction.
+
+Whole-device energy measurements were also compared with the analytical model,
+and the dataset expansion materially affected what could be validated. First, the
+local energy coefficient can no longer be validated on this dataset: reliable
+integration of battery current requires an execution of at least 500~ms, but
+after the augmentation every local execution completed in under 223~ms (median
+35~ms across 680 observations), because the heavier workloads that previously ran
+locally were routed remotely under the forced-mobility conditions. No local
+observation now satisfies the threshold, so the previously reported local
+over-estimate of approximately $68\times$ is unvalidated on the present dataset,
+a coverage regression introduced by the augmentation. Second, the remote
+coefficient is accurate only for particular workloads: across 163 remote
+observations of at least 500~ms the median ratio of measured to modeled energy
+was 0.29, but this aggregate is dominated by the video-frame edge-detection
+workload, for which the model over-estimates by roughly a factor of four, while
+the few lightweight remote observations under-estimate by a factor of two to
+four. The previously reported agreement within approximately 8\% therefore held
+only under the original, lighter workload mix and is composition-dependent.
+
+Beyond calibration, the remote energy model does not scale whole-device
+background consumption with the complete round-trip duration; it prices only the
+radio's transmit and idle draw. Figure~\ref{fig:energy-overrun} shows the ratio
+of measured whole-device energy to the modeled local energy estimate against
+remote round-trip time, excluding observations below 500~ms as sampling noise.
+Among the 230 qualifying remote observations, 89 (39\%) consumed more whole-device
+energy than the modeled local alternative, and the effect is concentrated in
+video-frame edge-detection round trips (3.6 to 9.9~s at an approximately 2.8~MB
+payload), the largest exceeding break-even by roughly a factor of 35. Combined
+with the latency result in Section~\ref{sec:system-performance}, where offloading
+that same task cost approximately 5.8~s against a 170~ms local execution, this
+identifies a single root cause: both the latency and energy estimators under-price
+the transmission of large payloads, so the policy offloads a task that is faster
+and cheaper to run locally. That one mis-routing drives the latency tail (p95
+6087~ms), the energy overruns, and all 25 fallbacks
+(Section~\ref{sec:system-performance}). Scaling both the latency and idle-energy
+terms by payload size and round-trip time, rather than by the radio's active
+window alone, would remove it.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\columnwidth]{energy-overrun.png}
+\caption{Remote energy overrun versus round-trip time.}
+\label{fig:energy-overrun}
+\end{figure}
+
+Because energy is half of the cost model's objective, the whole-device energy
+actually consumed under each policy is the directly relevant measure.
+Table~\ref{tab:energy-policy} reports the median measured energy per task. The
+learned-policy session is excluded because its device-power telemetry reads a
+median of 2874~mW against approximately 30~mW in every other session, an
+order-of-magnitude, session-specific artefact that makes its energy values
+non-comparable. Local execution is the cheapest option for every task, because
+the device returns to idle quickly rather than remaining awake for a network
+round trip. The adaptive rule policy tracks local energy on the light tasks it
+keeps on-device (1 to 6~mJ) but tracks cloud energy on the heavy tasks it
+offloads (187~mJ for video-frame edge detection). The adaptive policy therefore
+does not save whole-device energy relative to always-local; it is more efficient
+than always-cloud, which pays the round-trip cost even for trivial tasks, but
+energy is minimized by local execution, consistent with the overrun in
+Figure~\ref{fig:energy-overrun}.
+
+\begin{table}[t]
+\centering
+\caption{Median measured whole-device energy (mJ) per task, by policy}
+\label{tab:energy-policy}
+\footnotesize
+\begin{tabular}{lrrr}
+\toprule
+Task & Local-only & Cloud-only & Rule-based \\
+\midrule
+echo & 1 & 9 & 2 \\
+SHA-256 & 1 & 8 & 1 \\
+grayscale & 1 & 13 & 5 \\
+matrix-multiply & 1 & 10 & 6 \\
+video-frame-edges & 5 & 192 & 187 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+
+\subsection{Decision Quality: Classifier and Regret Analysis}
+\label{sec:decision-quality}
+
+The 50-tree Random Forest trained on the twelve deployed features achieved a test
+accuracy of 0.989 and a cross-validation accuracy of $0.999 \pm 0.002$, against a
+majority-class baseline of 0.495. This quantifies fidelity to the deterministic
+policy rather than independent decision quality, because the training labels were
+generated by that policy. The test accuracy is lower than the 1.000 obtained on
+the smaller pre-augmentation dataset; with 461 test observations a small number of
+genuine boundary cases now appear, which is more defensible than perfect
+reproduction. An alternative configuration incorporating three energy-related
+variables slightly reduced both test and cross-validation accuracy (0.989 to
+0.987 and 0.999 to 0.994), despite these features accounting for 14.5\% of Gini
+importance, indicating that they were correlated with information already
+represented by the deployed feature set.
+
+The adaptive training subset contained 913 local, 331 edge, and 600 cloud
+decisions. The 32.5\% cloud share is not the natural routing rate of the policy
+but a consequence of the targeted-mobility augmentation; under naturally observed
+stationary conditions the cloud share is approximately 4\%. The augmentation's
+value is that cloud-tier precision and recall (both approximately 0.99 on 150
+test observations) can now be reported at all, whereas the pre-augmentation
+dataset provided only about six cloud test observations.
+
+The twelve deployed features, ordered by their contribution to the trained
+forest, are summarized in Table~\ref{tab:feature-importance}. The model relies
+overwhelmingly on is\_stable and speedup, followed by the two latency estimates.
+The prominence of is\_stable must be read in light of the augmentation, which
+forced the mobility states so extensively that this feature became a
+near-deterministic edge-versus-cloud discriminator; on the original dataset it
+ranked below speedup and the latency estimates.
+
+\begin{table}[t]
+\centering
+\caption{Deployed Random Forest features, ordered by contribution to the
+trained model}
+\label{tab:feature-importance}
+\footnotesize
+\begin{tabularx}{\columnwidth}{@{}lX@{}}
+\toprule
+Feature & Description \\
+\midrule
+is\_stable & Boolean; true when the device is stationary (smoothed accelerometer linear acceleration below 0.3~m/s$^2$). Gates edge eligibility: edge is selected only while stationary, cloud while moving. \\
+speedup & Ratio of estimated local to estimated remote latency; the value on which the $1.5\times$ offload floor is applied. \\
+est\_remote\_ms & Estimated remote execution latency, including transmission (ms). \\
+est\_local\_ms & Estimated on-device execution latency (ms). \\
+task\_complexity & Ordinal workload weight: light $=0$, medium $=1$, heavy $=2$. \\
+network\_score & Composite network-health score in $[0,1]$ from RTT, bandwidth, and loss. \\
+rtt\_ms & Measured round-trip time to the edge tier (ms). \\
+battery\_percent & Device battery level (0 to 100\%). \\
+cpu\_percent & Current device processor utilization (\%). \\
+bandwidth\_mbps & Static per-transport downstream bandwidth estimate, not a live measurement. \\
+is\_charging & Boolean; true when the device is charging. \\
+network\_type\_rank & Ordinal connection type: none $=0$, LTE $=1$, Wi-Fi $=2$, 5G $=3$. \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+Classification accuracy characterizes the model offline but not as the active
+planner. A dedicated session therefore executed the Random Forest as the live
+on-device decision mechanism for 256 tasks with no fallback and no error,
+producing a tier distribution of 55.1\% local, 40.2\% edge, and 4.7\% cloud and a
+median latency of 50~ms. A direct comparison against the full rule-based pool is
+confounded by the augmentation, which skewed that pool toward cloud (aggregate
+50.2\% local, 16.3\% edge, 33.5\% cloud). Restricted to the matched stationary
+conditions the learned-policy session actually covered, the rule engine routes
+51.2\% local, 44.7\% edge, and 4.1\% cloud, so the cloud share realigns (4.1\%
+versus 4.7\%) while the local and edge split differs modestly. The defensible
+runtime-fidelity claim is therefore the narrower one: under matched conditions the
+learned policy reproduces the cloud-gating behavior and the median latency of the
+rule engine (50~ms versus 61~ms) at an inference cost below 1~ms per decision.
+
+Because agreement with rule-generated labels cannot independently validate the
+policy that generated them, decision quality was additionally assessed using
+regret relative to a matched-condition empirical oracle. For each combination of
+task, network, battery, and processor state with observations from at least two
+tiers and at least three samples per tier, the tier with the lowest empirically
+observed latency was treated as the reference. Twelve of the thirty-six populated
+condition groups qualified once the augmentation observations were included.
+
+\begin{table}[t]
+\centering
+\caption{Decision regret relative to the matched-condition empirical oracle}
+\label{tab:regret}
+\footnotesize
+\begin{tabular}{lrrr}
+\toprule
+Policy & $n$ & Median regret (ms) & Best tier (\%) \\
+\midrule
+Local-only & 44 & 4.14 & 100.0 \\
+Adaptive rule policy & 1422 & 40.62 & 45.0 \\
+Adaptive ML policy & 103 & $-0.17$ & 28.0 \\
+Static heuristic & 1609 & 123.92 & 40.6 \\
+Cloud-only & 40 & 361.37 & 0.0 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The static heuristic is a non-adaptive reference stronger than the fixed
+baselines: it routes light tasks to local and medium or heavy tasks to edge when
+stationary or cloud when moving, the policy's structure without any runtime cost
+estimation. Scored on the same buckets, it reaches 123.92~ms median regret
+against the rule engine's 40.62~ms, so the adaptive cost model yields roughly a
+threefold reduction in median regret over a plausible static rule of thumb. This
+is not a re-implementation of a specific published algorithm (a direct comparison
+against prior offloading policies remains future work,
+Section~\ref{sec:sensitivity-summary}), but it establishes that adaptivity earns
+its keep against more than the trivial baselines.
+
+Figure~\ref{fig:regret-policy} shows regret with 95\% confidence intervals. The
+favorable result for local-only reflects the composition of the qualifying
+condition groups and should not be read as general superiority. Both adaptive
+policies avoid the worst-tier choice made by the cloud-only baseline. Two
+properties sit in tension and are both reported: the learned policy attains the
+lowest median regret of any policy ($-0.17$~ms, indicating selections on average
+as fast as the mean of the oracle-best tier), yet it selects the exact best tier
+less often than the rule engine (28.0\% versus 45.0\%). This is consistent with a
+smoothed classifier that avoids large errors but is less precise at decision
+boundaries. Because the estimate rests on twelve small groups, the best-tier
+percentages are noisy and should not be over-interpreted; the learned-policy
+session also covered fewer conditions than the rule-based collection and predates
+the augmentation. The defensible conclusion is that both adaptive policies
+outperform the fixed cloud-only policy on this label-independent metric, and that
+the runtime quality of the learned policy is at least comparable to that of the
+rule engine.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\columnwidth]{regret-by-policy.png}
+\caption{Decision regret relative to the matched-condition oracle.}
+\label{fig:regret-policy}
+\end{figure}
+
+
+\subsection{Sensitivity and Threats to Validity}
+\label{sec:sensitivity-summary}
+
+\textbf{Mobility.}
+Because the physical device remained stationary during laboratory collection,
+mobility states were controlled experimentally, extensively so during the
+augmentation. Figure~\ref{fig:mobility-routing} shows target-tier selection under
+these conditions for adaptive executions. The edge tier was not selected in any
+of the 1{,}162 observations recorded while the device was moving, confirming
+enforcement of the stationary-only edge eligibility condition across a large
+number of opportunities to violate it.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\columnwidth]{mobility-routing.png}
+\caption{Target-tier selection under controlled mobility conditions.}
+\label{fig:mobility-routing}
+\end{figure}
+
+\textbf{Payload size.}
+For matrix multiplication, median latencies were 222~ms at the edge tier and
+98~ms at the cloud tier with negligible correlation against payload size, and the
+SHA-256 and grayscale workloads were similarly flat (absolute correlation at most
+0.23). No clear relationship between payload size and transmission cost was
+observed over the tested range.
+
+\textbf{Threats to validity.}
+The evaluation used a single device and one network, so device-specific
+quantities should not be treated as universal constants. The 80~ms cloud delay
+was a chosen emulation parameter, not a datacenter measurement. Edge contention
+was generated with synthetic HTTP clients on the experimental host rather than
+independent devices, so it demonstrates responsiveness to server load rather than
+multi-user scalability. Most importantly, the cloud class was enriched by forcing
+the mobility branch, so the dataset over-represents moving-device conditions; the
+classifier's per-class metrics benefit, but the class distribution, the loss of
+local-energy coverage, and the learned-versus-rules comparison are all affected.
+The regret analysis covers twelve of thirty-six groups on small samples, and
+bandwidth is a static capability estimate rather than measured throughput.
+
+\textbf{Not yet measured (future work).}
+Four questions this evaluation does not answer are stated so they are not mistaken
+for settled. First, middleware overhead: the continuous cost of the MAPE loop,
+the context collectors, and inference in CPU and battery terms is unquantified
+beyond the sub-millisecond per-decision figure, and an idle-drain measurement is
+required to confirm the system is not a net energy loss. Second, adaptation
+latency: the time between a context change and the policy acting on it, the
+defining property of a self-adaptive system, is not measured. Third, WAN
+sensitivity: the edge-versus-cloud trade-off pivots on the chosen 80~ms cloud
+delay, which was not swept, so an edge-favoring outcome could be an artefact of
+that constant. Fourth, comparison to prior work: the static heuristic is the only
+non-trivial baseline, and re-implementing an established offloading policy would
+position the results in the literature. The first three require additional
+on-device collection; the fourth requires implementing a baseline algorithm.
+
+\textbf{Summary.}
+The adaptive policy's demonstrated value is defensive: it delivers an
+approximately sixfold median-latency improvement over always-cloud (61~ms versus
+394~ms) at a 1.3\% fallback rate, avoids the worst-tier choice a fixed cloud-only
+policy makes on the non-circular regret metric, and beats a static complexity
+heuristic by roughly threefold in median regret. What it does not do, for this
+workload and network, is beat local execution: always-local was significantly
+faster on every task and consumed the least whole-device energy
+(Table~\ref{tab:energy-policy}), so the policy's role here is largely to recognize
+when to stay local. The Random Forest reproduces the rule engine with high
+fidelity (0.989 test, 0.999 cross-validation accuracy), imitation fidelity rather
+than an independent quality signal, and a 256-decision runtime session confirms
+the imitation holds on matched conditions. The clearest actionable finding is a
+cost-model defect: the latency and energy estimators under-price large-payload
+transmission, so the policy offloads video-frame edge detection (170~ms local
+versus approximately 5.8~s offloaded), and that single mis-routing accounts for
+the latency tail, the 39\% remote-energy overrun, and all 25 fallbacks.
+Correcting the transmission term is the highest-value next step.

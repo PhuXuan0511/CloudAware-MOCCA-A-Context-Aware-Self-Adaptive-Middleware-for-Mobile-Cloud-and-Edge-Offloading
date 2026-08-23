@@ -1,0 +1,26 @@
+\section{Conclusion}
+\label{sec:conclusion}
+
+This work presented and evaluated CloudAware-MOCCA, a context-aware
+self-adaptive middleware for mobile cloud and edge offloading, and its results
+yield three findings that go beyond the specific prototype. First, the physical
+deployment demonstrates that integrated adaptive offloading is feasible in
+practice rather than only in simulation. A complete monitor-analyze-plan-execute
+control loop, running on a commodity Android device against containerized edge
+and cloud tiers with transparent server-side forwarding under load, sustained
+real task execution with a low fallback rate and consistently avoided the
+penalty of a fixed always-cloud policy, confirming that the architecture behaves
+as intended on real hardware. Second, a compact learned model can reproduce a
+hand-tuned deterministic policy with high fidelity, but such fidelity must not be
+mistaken for independent decision superiority. Because the model is trained on
+the rule engine's own decisions, it faithfully imitates them at negligible
+on-device inference cost, yet on a label-independent quality metric it performs
+only on par with the policy it copies; demonstrating genuine improvement would
+require learning from measured execution outcomes rather than from
+rule-generated labels. Third, energy-model calibration and remote execution
+duration emerge as the principal limitations for energy-aware offloading, since
+pricing only radio activity rather than whole-device power across the full round
+trip caused a substantial share of remote executions to cost more energy than
+local execution. Addressing these limitations through duration-aware and
+payload-aware cost models, per-device power calibration, and quantified runtime
+overhead constitutes the most promising direction for future work.
